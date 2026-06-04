@@ -1,0 +1,15 @@
+# Block local virtual environments from uploading to GitHub
+.venv/
+venv/
+ENV/
+pyvenv.cfg
+
+# Block local node package distributions
+node_modules/
+dist/
+.env
+
+# Block cache and system artifacts
+__pycache__/
+*.pyc
+.DS_Store
