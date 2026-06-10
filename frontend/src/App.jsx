@@ -1,5 +1,5 @@
 ﻿import { useState } from "react";
-import { uploadFile, runAudit } from "./services/api";
+import { uploadFile, runAudit, runTextAudit } from "./services/api";
 import UploadBox from "./components/UploadBox";
 import AuditForm from "./components/AuditForm";
 import ResultsPanel from "./components/ResultsPanel";
@@ -10,6 +10,8 @@ function App() {
   const [uploadLoading, setUploadLoading] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
   const [error, setError] = useState("");
+  const [auditType, setAuditType] = useState("tabular");
+  const [textColumn, setTextColumn] = useState("text");
 
   const handleUpload = async (file) => {
     setError("");
@@ -18,19 +20,29 @@ function App() {
     setFileId("");
     try {
       const result = await uploadFile(file);
+      if (!result || !result.file_id) {
+        throw new Error("Upload failed. Backend did not return a file_id.");
+      }
       setFileId(result.file_id);
     } catch (err) {
-      setError(err.message || "Upload failed.");
+      setError(err?.message || String(err) || "Upload failed.");
     } finally {
       setUploadLoading(false);
     }
   };
 
-  const handleAudit = async (labelColumn) => {
+  const handleAudit = async (labelColumn, incomingTextCol = null) => {
     setError("");
     setAuditLoading(true);
     try {
-      const result = await runAudit(fileId, labelColumn);
+      let result;
+      if (auditType === "text") {
+        // Use the explicitly passed text column variable or fall back to local state
+        const targetTextCol = incomingTextCol || textColumn;
+        result = await runTextAudit(fileId, targetTextCol, labelColumn);
+      } else {
+        result = await runAudit(fileId, labelColumn);
+      }
       setAuditResult(result);
     } catch (err) {
       setError(err.message || "Audit failed.");
@@ -47,7 +59,10 @@ function App() {
 
   const steps = [
     { label: "Ingest Data", active: true },
-    { label: "Configure Label", active: Boolean(fileId) },
+    {
+      label: auditType === "text" ? "Configure Text & Label" : "Configure Label",
+      active: Boolean(fileId),
+    },
     { label: "Compute Audit", active: auditLoading || Boolean(auditResult) },
     { label: "Metric Registry", active: Boolean(auditResult) },
   ];
@@ -224,7 +239,17 @@ function App() {
             </div>
           )}
 
-          {fileId && <AuditForm handleAudit={handleAudit} auditLoading={auditLoading} fileId={fileId} />}
+          {fileId && (
+            <AuditForm 
+              handleAudit={handleAudit} 
+              auditLoading={auditLoading} 
+              fileId={fileId} 
+              auditType={auditType}
+              setAuditType={setAuditType}
+              textColumn={textColumn}
+              setTextColumn={setTextColumn}
+            />
+          )}
         </div>
 
         <ResultsPanel result={auditResult} />

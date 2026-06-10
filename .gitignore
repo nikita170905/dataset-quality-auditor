@@ -1,8 +1,8 @@
 # Block local virtual environments from uploading to GitHub
 .venv/
 venv/
+env/
 ENV/
-pyvenv.cfg
 
 # Block local node package distributions
 node_modules/
@@ -13,3 +13,9 @@ dist/
 __pycache__/
 *.pyc
 .DS_Store
+*.log
+.vscode/
+pyvenv.cfg
+*.pyo
+*.pyd
+.pytest_cache/

@@ -41,3 +41,15 @@ export async function runAudit(file_id, label_column) {
 
   return handleResponse(response);
 }
+
+export async function runTextAudit(file_id, text_column, label_column) {
+  const response = await fetch(`${API_BASE_URL}/api/audit/text`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ file_id, text_column, label_column }),
+  });
+
+  return handleResponse(response);
+}
