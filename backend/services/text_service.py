@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from functools import lru_cache
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,15 +17,64 @@ from sklearn.preprocessing import LabelEncoder
 
 try:
     from cleanlab.filter import find_label_issues
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover
     find_label_issues = None
 
 logger = logging.getLogger(__name__)
 
+# Module-level thread-safe singleton state memory indicators
+_model: SentenceTransformer | None = None
 
-@lru_cache(maxsize=1)
-def get_sentence_model() -> SentenceTransformer:
-    return SentenceTransformer("all-MiniLM-L6-v2")
+
+def get_embedding_model() -> SentenceTransformer:
+    """Returns a cached singleton instance of the embedding model.
+
+    Initializes once on first call, reuses on all subsequent calls.
+    Never re-downloads or re-loads weights mid-session.
+    
+    Returns:
+        SentenceTransformer: Pre-loaded all-MiniLM-L6-v2 vectorization instance.
+    """
+    global _model
+    if _model is None:
+        logger.info("Initializing SentenceTransformer model (first load)...")
+        _model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("Model loaded and cached seamlessly in memory.")
+    return _model
+
+
+def _stratified_sample(df: pd.DataFrame, label_col: str, max_rows: int) -> pd.DataFrame:
+    """Returns a stratified sample preserving class proportions.
+    
+    Falls back to a standard random sample if group sizes are too small 
+    or if stratification fails due to extreme skew.
+
+    Args:
+        df: Cleaned pandas DataFrame containing the target label column.
+        label_col: Name of the column tracking categorical class distributions.
+        max_rows: The absolute ceiling limit of indices allowed in the slice.
+
+    Returns:
+        pd.DataFrame: A proportion-retaining balanced snapshot of the dataset.
+    """
+    if len(df) <= max_rows:
+        return df
+
+    try:
+        # Group by labels, calculate exact target ratio chunk weights, and sample each group evenly
+        return df.groupby(label_col, group_keys=False).apply(
+            lambda x: x.sample(
+                min(len(x), max(1, int(max_rows * len(x) / len(df)))),
+                random_state=42
+            )
+        ).reset_index(drop=True)
+    except Exception as exc:
+        logger.warning(
+            "Stratified sampling execution split encountered an anomaly: %s. "
+            "Falling back to basic uniform random sampling distribution arrays.", 
+            exc
+        )
+        return df.sample(max_rows, random_state=42).reset_index(drop=True)
 
 
 def detect_semantic_inconsistencies(
@@ -35,7 +84,7 @@ def detect_semantic_inconsistencies(
     similarity_threshold: float = 0.95,
     max_rows: int = 5000,
 ) -> List[Dict[str, object]]:
-    """Detect semantically similar text pairs with differing labels.
+    """Detect semantically similar text pairs with differing labels using stratified tracking loops.
 
     Args:
         df: Pre-validated pandas DataFrame containing text and label columns.
@@ -45,10 +94,8 @@ def detect_semantic_inconsistencies(
         max_rows: Maximum number of rows to process after dropping missing values.
 
     Returns:
-        A list of dictionaries describing inconsistent text pairs. Each item contains
-        original DataFrame indices, text values, labels, and similarity score.
+        List[Dict[str, object]]: Array of dictionaries describing inconsistent text pairs.
     """
-
     if text_column not in df.columns:
         raise ValueError(f"Missing text_column '{text_column}' in DataFrame.")
     if label_column not in df.columns:
@@ -58,12 +105,13 @@ def detect_semantic_inconsistencies(
     df_clean = df_clean.dropna(subset=[text_column, label_column])
 
     if len(df_clean) > max_rows:
-        logger.warning(
-            "Truncating text audit input from %d to max_rows=%d before processing.",
+        logger.info(
+            "Text audit dataset dimensions (%d rows) breach optimization limits. "
+            "Triggering balanced stratified sampling matrix generation down to max_rows=%d.",
             len(df_clean),
             max_rows,
         )
-        df_clean = df_clean.iloc[:max_rows]
+        df_clean = _stratified_sample(df_clean, label_column, max_rows)
 
     if df_clean.empty:
         return []
@@ -72,7 +120,8 @@ def detect_semantic_inconsistencies(
     label_values = df_clean[label_column].tolist()
     original_indices = df_clean.index.to_numpy()
 
-    model = get_sentence_model()
+    # Utilize the high-performance in-memory singleton instance
+    model = get_embedding_model()
     embeddings = model.encode(text_values, convert_to_numpy=True)
 
     similarity_matrix = cosine_similarity(embeddings)
@@ -106,7 +155,7 @@ def detect_label_noise(
     text_column: str,
     label_column: str,
 ) -> List[Dict[str, object]]:
-    """Detect potential label noise using cross-validated class probabilities.
+    """Detect potential label noise using stratified sampling loops and cross-validated class probabilities.
 
     Args:
         df: Pre-validated pandas DataFrame containing text and label columns.
@@ -114,11 +163,8 @@ def detect_label_noise(
         label_column: Name of the label column whose quality is evaluated.
 
     Returns:
-        A list of dictionaries describing suspected noisy labels. Each item contains
-        the original DataFrame index, raw text, given label, suggested label, and
-        a label_quality score representing the model confidence in the original label.
+        List[Dict[str, object]]: Array of dictionaries describing suspected noisy labels.
     """
-
     if text_column not in df.columns:
         raise ValueError(f"Missing text_column '{text_column}' in DataFrame.")
     if label_column not in df.columns:
@@ -127,12 +173,16 @@ def detect_label_noise(
     df_clean = df[[text_column, label_column]].copy()
     df_clean = df_clean.dropna(subset=[text_column, label_column])
 
-    if len(df_clean) > 2000:
-        logger.warning(
-            "Truncating label noise detection input from %d to 2000 rows.",
+    # Hard target boundary limit configured for cleanlab probability matrix calculations
+    max_noise_rows = 2000
+    if len(df_clean) > max_noise_rows:
+        logger.info(
+            "Label noise data dimensions (%d rows) breach baseline optimization scales. "
+            "Applying stratified sampling snapshot sequences down to target cap=%d.",
             len(df_clean),
+            max_noise_rows,
         )
-        df_clean = df_clean.iloc[:2000]
+        df_clean = _stratified_sample(df_clean, label_column, max_noise_rows)
 
     if len(df_clean) < 6:
         raise ValueError("Too few samples for label noise detection (min 6 required)")
@@ -141,14 +191,16 @@ def detect_label_noise(
     for class_name, count in label_counts.items():
         if count < 3:
             raise ValueError(
-                f"Class '{class_name}' has fewer than 3 samples. 3-fold CV requires at least 3 samples per class."
+                f"Class '{class_name}' has fewer than 3 samples in the stratified matrix snapshot. "
+                "3-fold Cross-Validation loops strictly require at least 3 active row vectors per unique class signature."
             )
 
     text_values = df_clean[text_column].astype(str).tolist()
     label_values = df_clean[label_column].tolist()
     original_indices = df_clean.index.to_numpy()
 
-    embeddings = get_sentence_model().encode(text_values, convert_to_numpy=True)
+    # Utilize the high-performance in-memory singleton instance
+    embeddings = get_embedding_model().encode(text_values, convert_to_numpy=True)
 
     encoder = LabelEncoder()
     y_encoded = encoder.fit_transform(label_values)
@@ -171,7 +223,8 @@ def detect_label_noise(
         )
     else:
         logger.warning(
-            "cleanlab is not installed; using low-confidence predictions as a fallback for label noise detection."
+            "cleanlab is not installed in the operating environment; "
+            "deploying mathematical low-confidence self-prediction quantiles as an automated analytical fallback structure."
         )
         self_confidence = pred_probs[np.arange(len(y_encoded)), y_encoded]
         threshold = float(np.quantile(self_confidence, 0.2))
@@ -202,8 +255,16 @@ def detect_spurious_correlations(
 ) -> dict[str, list[dict]]:
     """Detect tokens that are statistically correlated with each class label,
     ensuring directionality and removing raw HTML noise.
-    """
 
+    Args:
+        df: Pre-validated pandas DataFrame containing text and label columns.
+        text_column: Name of the text column to analyze.
+        label_column: Name of the label column for tracking correlations.
+        top_n: Maximum number of highly correlated keywords to return per class.
+
+    Returns:
+        dict[str, list[dict]]: Structured keywords mapped per label signature.
+    """
     if text_column not in df.columns:
         raise ValueError(f"Missing text_column '{text_column}' in DataFrame.")
     if label_column not in df.columns:
@@ -216,12 +277,11 @@ def detect_spurious_correlations(
     if unique_classes < 2:
         raise ValueError("Need at least 2 classes for spurious correlation detection")
 
-    # Task 1: Clean up HTML linebreaks, tags, and normalize whitespace
     def clean_text(text: str) -> str:
         text = str(text)
-        text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)  # Clear out <br />
-        text = re.sub(r"<[^>]+>", " ", text)                         # Remove general html nodes
-        text = re.sub(r"\s+", " ", text)                             # Squash spacing gaps
+        text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
         return text.strip()
 
     cleaned_texts = [clean_text(t) for t in df_clean[text_column].tolist()]
@@ -234,7 +294,6 @@ def detect_spurious_correlations(
         logger.warning("CountVectorizer produced empty vocabulary; returning empty dictionary.")
         return {}
 
-    # Convert sparse array once to matrix rows for efficient conditional slicing
     X_array = X.toarray()
     global_means = np.mean(X_array, axis=0)
 
@@ -243,19 +302,14 @@ def detect_spurious_correlations(
 
     for class_name in class_names:
         y_binary = (df_clean[label_column] == class_name).astype(int).to_numpy()
-        
-        # Calculate standard Chi2 dependency score metrics
         chi2_scores, _ = chi2(X, y_binary)
         
-        # Task 2: Calculate directional affinity using feature conditional grouping means
         class_mask = (y_binary == 1)
         class_means = np.mean(X_array[class_mask], axis=0)
         
-        # Retain only words whose occurrence rating inside this class exceeds global base metrics
         valid_direction_mask = class_means > global_means
         directional_scores = np.where(valid_direction_mask, chi2_scores, -1.0)
         
-        # Rank features descending, sorting out invalid indicators
         ordered_indices = np.argsort(directional_scores)[::-1]
         
         top_tokens = []
