@@ -2,7 +2,7 @@
 
 A multimodal dataset health evaluation platform built with **FastAPI** and **React**. Upload any CSV dataset and receive a structured audit report covering class imbalance, label noise, duplicate detection, missing values, and semantic inconsistencies — with a weighted health score and prioritized fix list.
 
-> **Status:** MVP complete (Phases 1–2 and 4). Phase 3 (image dataset auditing) is scoped for future development.
+> **Status:** MVP complete. Image dataset auditing is scoped for future development.
 
 ---
 
