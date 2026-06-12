@@ -50,26 +50,26 @@ A multimodal dataset health evaluation platform built with **FastAPI** and **Rea
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                 React Frontend                   │
-│  UploadBox → AuditForm → HealthDashboard         │
-│  SSE consumer → real-time progress bar           │
+│                 React Frontend                           │
+│  UploadBox → AuditForm → HealthDashboard                │
+│  SSE consumer → real-time progress bar                   │
 └────────────────────┬────────────────────────────┘
                      │ HTTP / SSE
 ┌────────────────────▼────────────────────────────┐
-│               FastAPI Backend                    │
-│                                                  │
-│  POST /api/upload        → storage.py (UUID map) │
-│  POST /api/audit         → tabular audit         │
-│  POST /api/audit/text    → text audit            │
-│  POST /api/audit/full    → combined pipeline     │
-│  POST /api/audit/full/stream → SSE stream        │
+│               FastAPI Backend                             │
+│                                                           │
+│  POST /api/upload        → storage.py (UUID map)         │
+│  POST /api/audit         → tabular audit                 │
+│  POST /api/audit/text    → text audit                    │
+│  POST /api/audit/full    → combined pipeline             │
+│  POST /api/audit/full/stream → SSE stream                │
 └──────┬──────────────┬───────────────┬────────────┘
-       │              │               │
+         │                │                  │
 ┌──────▼──────┐ ┌─────▼──────┐ ┌─────▼──────────┐
-│tabular_     │ │text_       │ │scorer.py       │
-│service.py   │ │service.py  │ │advisor.py      │
-│(pandas)     │ │(ST + CL)   │ │(rule engine)   │
-└─────────────┘ └────────────┘ └────────────────┘
+│tabular_        │ │text_         │ │scorer.py           │
+│service.py      │ │service.py.   │ │advisor.py          │
+│(pandas)        │ │(ST + CL)     │ │(rule engine)       │
+└─────────────┘  └────────────┘ └────────────────┘
 ```
 
 **Key design rule:** Service layer files (`tabular_service.py`, `text_service.py`, `scorer.py`, `advisor.py`) have zero FastAPI imports — they are pure Python/Pandas and independently testable.
