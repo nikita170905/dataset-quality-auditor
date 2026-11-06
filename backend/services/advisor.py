@@ -1,28 +1,43 @@
 from typing import Any, Dict, List, Optional
 
 
+MAX_REPORTED_PAIRS = 500  # keep in sync with detect_semantic_inconsistencies(max_pairs=...)
+
+
+def _has_real_text(text_result: dict | None) -> bool:
+    """True when text checks ran on genuine natural-language text (not synthesized rows)."""
+    return text_result is not None and not text_result.get("text_is_synthetic")
+
+
 def generate_issues(tabular_result: dict, text_result: dict | None, score_breakdown: dict) -> list[dict]:
     """Generate issue dictionaries matching the IssueItem schema from audit results."""
     issues: list[dict] = []
 
-    vals = [float(v) for v in tabular_result.get("missing_values", {}).values()]
+    missing_values = tabular_result.get("missing_values", {}) or {}
+    vals = [float(v) for v in missing_values.values()]
     avg_missing = sum(vals) / len(vals) if vals else 0.0
+    worst = sorted(
+        ((str(col), float(pct)) for col, pct in missing_values.items() if float(pct) > 0.0),
+        key=lambda item: -item[1],
+    )[:3]
+    worst_text = ", ".join(f"{col} {pct:.1f}%" for col, pct in worst)
+    max_missing = worst[0][1] if worst else 0.0
     if avg_missing > 20.0:
         issues.append(
             {
                 "category": "Missing Values",
                 "severity": "CRITICAL",
-                "description": f"High missing data rate ({avg_missing:.1f}% avg)",
+                "description": f"High missing data rate ({avg_missing:.1f}% avg; worst: {worst_text})",
                 "fix_suggestion": "Impute using column median/mode or drop columns above 40% threshold",
             }
         )
-    elif avg_missing > 5.0:
+    elif avg_missing > 5.0 or max_missing > 40.0:
         issues.append(
             {
                 "category": "Missing Values",
                 "severity": "WARNING",
-                "description": "Moderate missing values detected",
-                "fix_suggestion": "Review columns for systematic missingness patterns",
+                "description": f"Missing values detected (worst: {worst_text})",
+                "fix_suggestion": "Drop or impute columns above 40% missing; review the rest for systematic missingness",
             }
         )
 
@@ -78,11 +93,11 @@ def generate_issues(tabular_result: dict, text_result: dict | None, score_breakd
             }
         )
 
-    if text_result is not None:
+    if _has_real_text(text_result):
         noise_count = len(text_result.get("label_noise_issues", []))
         t_rows = int(text_result.get("row_count", 1))
         noise_fraction = noise_count / t_rows if t_rows > 0 else 0.0
-        if noise_fraction > 0.15:
+        if noise_fraction > 0.133:  # label-noise score < 60 (dashboard 'Critical')
             issues.append(
                 {
                     "category": "Label Noise",
@@ -91,7 +106,7 @@ def generate_issues(tabular_result: dict, text_result: dict | None, score_breakd
                     "fix_suggestion": "Re-annotate flagged samples — review suggested_label column",
                 }
             )
-        elif noise_fraction > 0.05:
+        elif noise_fraction > 0.067:  # label-noise score < 80 (dashboard 'Needs Attention')
             issues.append(
                 {
                     "category": "Label Noise",
@@ -107,7 +122,7 @@ def generate_issues(tabular_result: dict, text_result: dict | None, score_breakd
                 {
                     "category": "Semantic Inconsistencies",
                     "severity": "WARNING",
-                    "description": f"Many near-duplicate texts with conflicting labels ({pairs} pairs)",
+                    "description": f"Many near-duplicate texts with conflicting labels ({pairs}{'+' if pairs >= MAX_REPORTED_PAIRS else ''} pairs)",
                     "fix_suggestion": "Review semantic_inconsistencies — unify labels or remove duplicates",
                 }
             )
@@ -118,6 +133,43 @@ def generate_issues(tabular_result: dict, text_result: dict | None, score_breakd
                     "severity": "INFO",
                     "description": f"Some ambiguous text-label pairs found ({pairs} pairs)",
                     "fix_suggestion": "Check inconsistency pairs for annotation errors",
+                }
+            )
+
+    if _has_real_text(text_result):
+        # Low measured consistency without enough conflicting pairs to trigger the
+        # pair-count issue above: surface it so the report never says "healthy"
+        # while the score card is red.
+        semantic_score = score_breakdown.get("semantic_consistency", 100.0)
+        if semantic_score < 70.0 and not any(i["category"] == "Semantic Inconsistencies" for i in issues):
+            issues.append(
+                {
+                    "category": "Semantic Inconsistencies",
+                    "severity": "WARNING",
+                    "description": f"Low semantic consistency score ({semantic_score:.1f}/100)",
+                    "fix_suggestion": "Similar texts often carry different labels; review labeling guidelines",
+                }
+            )
+
+        label_score = score_breakdown.get("label_noise", 100.0)
+        if label_score < 50.0 and not any(i["category"] == "Label Noise" for i in issues):
+            issues.append(
+                {
+                    "category": "Label Noise",
+                    "severity": "CRITICAL",
+                    "description": "Labels appear unrelated to the text: a model that never saw each row cannot predict its label better than chance",
+                    "fix_suggestion": "Check that the right label column was chosen and that labels were not shuffled or assigned randomly",
+                }
+            )
+
+        domain_score = text_result.get("domain_suitability_score")
+        if domain_score is not None and domain_score < 40.0:
+            issues.append(
+                {
+                    "category": "Domain Suitability",
+                    "severity": "WARNING" if domain_score < 20.0 else "INFO",
+                    "description": f"Dataset text is semantically distant from your project intent ({domain_score:.1f}/100)",
+                    "fix_suggestion": "Describe your data domain in the intent (not just the task), or use a dataset closer to your goal",
                 }
             )
 
@@ -138,13 +190,19 @@ def generate_augmentation_strategies(tabular_result: dict, text_result: dict | N
             {
                 "strategy_name": "Minority class oversampling",
                 "target_issue": "Class Imbalance",
-                "method": "SMOTE (use imbalanced-learn library)",
+                "method": (
+                    "Random oversampling of minority texts or class-weighted loss (SMOTE needs numeric features)"
+                    if _has_real_text(text_result)
+                    else "SMOTE (use imbalanced-learn library)"
+                ),
                 "priority": 1,
             }
         )
 
-    if text_result is not None:
-        if len(text_result.get("label_noise_issues", [])) > 0:
+    has_label_issue = any(i["category"] == "Label Noise" for i in issues)
+    has_semantic_issue = any(i["category"] == "Semantic Inconsistencies" for i in issues)
+    if _has_real_text(text_result):
+        if has_label_issue and len(text_result.get("label_noise_issues", [])) > 0:
             strategies.append(
                 {
                     "strategy_name": "Re-annotation campaign",
@@ -161,7 +219,7 @@ def generate_augmentation_strategies(tabular_result: dict, text_result: dict | N
                     "priority": 3,
                 }
             )
-        if len(text_result.get("semantic_inconsistencies", [])) > 0:
+        if has_semantic_issue and len(text_result.get("semantic_inconsistencies", [])) > 0:
             strategies.append(
                 {
                     "strategy_name": "Deduplication + label unification",

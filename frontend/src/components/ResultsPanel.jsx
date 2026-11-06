@@ -11,7 +11,7 @@ const badgeStyles = {
   },
   success: {
     backgroundColor: "rgba(244, 114, 182, 0.18)",
-    color: "var(--color-pink)",
+    color: "var(--text-primary)",
   },
   warning: {
     backgroundColor: "rgba(251, 191, 36, 0.18)",
@@ -228,7 +228,7 @@ const styles = {
   },
   correlationTitle: {
     margin: 0,
-    color: "var(--color-blue)",
+    color: "var(--text-primary)",
     fontSize: "0.98rem",
     fontWeight: 700,
   },
@@ -297,18 +297,18 @@ function ResultsPanel({ result }) {
         </div>
 
         <div style={styles.grid}>
-          <div style={{ ...styles.summaryCard, borderTop: "3px solid var(--color-blue)" }}>
+          <div style={{ ...styles.summaryCard, borderTop: "1px solid var(--border-subtle)" }}>
             <p style={styles.summaryLabel}>Rows</p>
-            <p style={{ ...styles.summaryValue, color: "var(--color-blue)" }}>{result.row_count.toLocaleString()}</p>
+            <p style={{ ...styles.summaryValue, color: "var(--text-primary)" }}>{result.row_count.toLocaleString()}</p>
           </div>
-          <div style={{ ...styles.summaryCard, borderTop: "3px solid var(--color-purple)" }}>
+          <div style={{ ...styles.summaryCard, borderTop: "1px solid var(--border-subtle)" }}>
             <p style={styles.summaryLabel}>Columns</p>
-            <p style={{ ...styles.summaryValue, color: "var(--color-purple)" }}>{result.column_count}</p>
+            <p style={{ ...styles.summaryValue, color: "var(--text-primary)" }}>{result.column_count}</p>
           </div>
           <div
             style={{
               ...styles.summaryCard,
-              borderTop: `3px solid ${result.imbalance_ratio > 1.5 ? "var(--color-yellow)" : "var(--color-blue)"}`,
+              borderTop: "1px solid var(--border-subtle)",
             }}
           >
             <p style={styles.summaryLabel}>Imbalance Ratio</p>
@@ -320,7 +320,7 @@ function ResultsPanel({ result }) {
           <div
             style={{
               ...styles.summaryCard,
-              borderTop: `3px solid ${duplicateCount === 0 ? "var(--color-pink)" : duplicateCount <= 5 ? "var(--color-yellow)" : "var(--color-red)"}`,
+              borderTop: "1px solid var(--border-subtle)",
             }}
           >
             <p style={styles.summaryLabel}>Duplicate Rows</p>
@@ -416,13 +416,13 @@ function ResultsPanel({ result }) {
 
       <div style={styles.textLayout}>
         <div style={styles.textSummaryGrid}>
-          <div style={{ ...styles.metricCard, borderTop: "3px solid var(--color-blue)" }}>
+          <div style={{ ...styles.metricCard, borderTop: "1px solid var(--border-subtle)" }}>
             <p style={styles.metricLabel}>Total Analyzed Rows</p>
-            <p style={{ ...styles.metricValue, color: "var(--color-blue)" }}>{Number(result.row_count ?? 0).toLocaleString()}</p>
+            <p style={{ ...styles.metricValue, color: "var(--text-primary)" }}>{Number(result.row_count ?? 0).toLocaleString()}</p>
           </div>
-          <div style={{ ...styles.metricCard, borderTop: "3px solid var(--color-pink)" }}>
+          <div style={{ ...styles.metricCard, borderTop: "1px solid var(--border-subtle)" }}>
             <p style={styles.metricLabel}>Annotation Inconsistencies</p>
-            <p style={{ ...styles.metricValue, color: "var(--color-pink)" }}>{result.inconsistency_count ?? 0}</p>
+            <p style={{ ...styles.metricValue, color: "var(--text-primary)" }}>{result.inconsistency_count ?? 0}</p>
           </div>
           <div style={{ ...styles.metricCard, borderTop: "3px solid var(--color-yellow)" }}>
             <p style={styles.metricLabel}>Suspected Label Noise Issues</p>
@@ -431,7 +431,7 @@ function ResultsPanel({ result }) {
         </div>
 
         <div style={styles.textSection}>
-          <h3 style={{ ...styles.textSectionTitle, color: "var(--color-pink)" }}>Annotation Inconsistencies</h3>
+          <h3 style={{ ...styles.textSectionTitle, color: "var(--text-primary)" }}>Annotation Inconsistencies</h3>
           {semanticInconsistencies.length === 0 ? (
             <div style={styles.emptyState}>No text annotation conflicts discovered.</div>
           ) : (
@@ -448,14 +448,14 @@ function ResultsPanel({ result }) {
                     <div style={styles.conflictBlock}>
                       <div style={{ color: "var(--text-secondary)" }}>Text 1</div>
                       <div>{item.text_1}</div>
-                      <div style={{ marginTop: "0.5rem", color: "var(--color-pink)", fontWeight: 700 }}>
+                      <div style={{ marginTop: "0.5rem", color: "var(--text-primary)", fontWeight: 700 }}>
                         Label: {item.label_1}
                       </div>
                     </div>
                     <div style={styles.conflictBlock}>
                       <div style={{ color: "var(--text-secondary)" }}>Text 2</div>
                       <div>{item.text_2}</div>
-                      <div style={{ marginTop: "0.5rem", color: "var(--color-pink)", fontWeight: 700 }}>
+                      <div style={{ marginTop: "0.5rem", color: "var(--text-primary)", fontWeight: 700 }}>
                         Label: {item.label_2}
                       </div>
                     </div>
@@ -497,7 +497,7 @@ function ResultsPanel({ result }) {
         </div>
 
         <div style={styles.textSection}>
-          <h3 style={{ ...styles.textSectionTitle, color: "var(--color-blue)" }}>Spurious Shortcut Correlations</h3>
+          <h3 style={{ ...styles.textSectionTitle, color: "var(--text-primary)" }}>Spurious Shortcut Correlations</h3>
           {Object.keys(spuriousCorrelations).length === 0 ? (
             <div style={styles.emptyState}>No shortcut correlation signals available.</div>
           ) : (

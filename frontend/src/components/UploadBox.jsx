@@ -10,26 +10,30 @@ const formatSize = (bytes) => {
 const styles = {
   card: {
     border: "1px solid var(--border-subtle)",
-    borderRadius: 16,
+    borderRadius: 8,
     padding: "1.75rem",
     background: "var(--bg-surface)",
-    boxShadow: "0 10px 30px rgba(0, 0, 0, 0.35)",
     transition: "transform 0.2s ease, border-color 0.2s ease",
   },
   dragArea: {
-    border: "1px dashed var(--border-subtle)",
-    borderRadius: 12,
+    // Longhand border properties only — the hover style below overrides
+    // borderColor, and mixing shorthand `border` with longhand overrides
+    // triggers React DOM warnings on rerender.
+    borderWidth: "1px",
+    borderStyle: "dashed",
+    borderColor: "var(--border-subtle)",
+    borderRadius: 6,
     padding: "2rem",
     textAlign: "center",
     cursor: "pointer",
     color: "var(--text-primary)",
-    background: "var(--bg-input)",
+    background: "transparent",
     marginBottom: "1rem",
     transition: "background-color 0.2s ease, border-color 0.2s ease",
   },
   dragAreaHover: {
     borderColor: "var(--color-yellow)",
-    background: "rgba(251, 191, 36, 0.08)",
+    background: "var(--bg-input)",
   },
   button: {
     display: "inline-flex",
@@ -39,8 +43,8 @@ const styles = {
     padding: "0 1.25rem",
     borderRadius: 6,
     border: "none",
-    background: "var(--color-purple)",
-    color: "var(--text-primary)",
+    background: "var(--text-primary)",
+    color: "#000000",
     fontWeight: 600,
     cursor: "pointer",
     transition: "background-color 0.2s ease, transform 0.2s ease",

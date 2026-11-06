@@ -1,12 +1,9 @@
-import { useState } from "react";
-
 const styles = {
   card: {
     border: "1px solid var(--border-subtle)",
-    borderRadius: 16,
+    borderRadius: 8,
     padding: "1.75rem",
     background: "var(--bg-surface)",
-    boxShadow: "0 10px 30px rgba(0, 0, 0, 0.15)",
     transition: "transform 0.2s ease, border-color 0.2s ease",
   },
   workflowRow: {
@@ -17,7 +14,7 @@ const styles = {
   },
   workflowTab: {
     padding: "0.95rem 1rem",
-    borderRadius: 14,
+    borderRadius: 6,
     border: "1px solid var(--border-color)",
     background: "var(--bg-app)",
     color: "var(--text-primary)",
@@ -28,10 +25,9 @@ const styles = {
       "transform 0.2s ease, border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease",
   },
   workflowTabActive: {
-    background: "rgba(99, 102, 241, 0.15)",
-    border: "1px solid var(--color-purple, #6366f1)",
-    boxShadow:
-      "0 0 0 1px rgba(99, 102, 241, 0.1) inset, 0 10px 24px rgba(99, 102, 241, 0.05)",
+    background: "var(--text-primary)",
+    border: "1px solid var(--text-primary)",
+    color: "#000000",
   },
   formGrid: {
     display: "grid",
@@ -56,8 +52,8 @@ const styles = {
     padding: "0 1.25rem",
     borderRadius: 6,
     border: "none",
-    background: "var(--color-purple, #6366f1)",
-    color: "#ffffff",
+    background: "var(--text-primary)",
+    color: "#000000",
     fontWeight: 600,
     cursor: "pointer",
     transition: "background-color 0.2s ease, transform 0.2s ease",
@@ -83,74 +79,35 @@ const styles = {
     fontWeight: 600,
     fontSize: "0.9rem",
   },
-  optionalBadge: {
-    display: "inline-block",
-    marginLeft: "0.4rem",
-    fontSize: "0.75rem",
-    fontWeight: 500,
-    color: "var(--text-secondary)",
-    background: "var(--bg-app)",
-    border: "1px solid var(--border-color)",
-    borderRadius: 6,
-    padding: "0.1rem 0.4rem",
-    verticalAlign: "middle",
-  },
 };
 
 function AuditForm({
   handleAudit,
   auditLoading,
-  fileId,
   auditMode,
   setAuditMode,
-  textColumn,
+  projectIntent,
+  setProjectIntent,
+  columns = [],
+  labelColumn = "",
+  setLabelColumn,
+  textColumn = "",
   setTextColumn,
 }) {
-  const [labelColumn, setLabelColumn] = useState("");
-
   const isTextMode = auditMode === "text";
-  const isFullMode = auditMode === "full";
-  const showTextField = auditMode !== "tabular";
-
-  // Text column is only strictly required in pure text NLP mode.
-  // In full audit mode it is optional — the backend accepts null.
-  const isDisabled =
-    !fileId ||
-    auditLoading ||
-    !labelColumn.trim() ||
-    (isTextMode && !textColumn.trim());
+  const isDisabled = auditLoading;
 
   const onSubmit = (event) => {
     event.preventDefault();
     if (isDisabled) return;
-
-    // For full audit, send textColumn only when the user actually filled it in.
-    // For text mode, always send it (already validated above).
-    // For tabular, send null.
-    let targetTextColumn = null;
-    if (isTextMode) {
-      targetTextColumn = textColumn.trim();
-    } else if (isFullMode) {
-      targetTextColumn = textColumn.trim() || null;
-    }
-
-    handleAudit(labelColumn.trim(), targetTextColumn);
+    handleAudit(projectIntent.trim());
   };
 
   const getButtonLabel = () => {
     if (auditLoading) return "Running audit...";
-    if (isFullMode) return "Run Full Dataset Audit";
+    if (auditMode === "full") return "Run Full Dataset Audit";
     if (isTextMode) return "Run Text NLP Audit";
     return "Run Tabular Audit";
-  };
-
-  const getHintText = () => {
-    if (!fileId) return "Upload a dataset first to enable auditing.";
-    if (isFullMode)
-      return "Enter the label column name. Text column is optional — leave blank if your dataset has no text column.";
-    if (isTextMode)
-      return "Enter both the label column and text column names to run the NLP audit.";
-    return "Enter the label column name and run the audit.";
   };
 
   return (
@@ -185,50 +142,47 @@ function AuditForm({
 
       <form onSubmit={onSubmit}>
         <div style={styles.formGrid}>
-          {/* Label column — always required */}
+          {columns.length > 0 && setLabelColumn && (
+            <>
+              <label style={styles.field}>
+                <span style={styles.fieldLabel}>Label column (what to predict)</span>
+                <select value={labelColumn} onChange={(e) => setLabelColumn(e.target.value)}
+                        style={styles.input} aria-label="Label column">
+                  <option value="">Select a column...</option>
+                  {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </label>
+              <label style={styles.field}>
+                <span style={styles.fieldLabel}>Text column (optional)</span>
+                <select value={textColumn} onChange={(e) => setTextColumn(e.target.value)}
+                        style={styles.input} aria-label="Text column">
+                  <option value="">None - build text from all columns</option>
+                  {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </label>
+            </>
+          )}
+          
+          {/* Project intent — always optional. Fed to the backend domain
+              relevance check, which compares the stated goal against the
+              semantics of the text column. */}
           <label style={styles.field}>
-            <span style={styles.fieldLabel}>Label column</span>
+            <span style={styles.fieldLabel}>
+              Project Intent (What are you building?)
+              <span style={styles.optionalBadge} aria-label="optional">
+                optional
+              </span>
+            </span>
             <input
               type="text"
-              value={labelColumn}
-              onChange={(e) => setLabelColumn(e.target.value)}
-              placeholder="e.g. label"
+              value={projectIntent}
+              onChange={(e) => setProjectIntent(e.target.value)}
+              placeholder='e.g., "Predicting financial fraud" or "Sentiment analysis on movie reviews"'
               style={styles.input}
-              aria-label="Label column name"
+              aria-label="Project intent"
               autoComplete="off"
             />
           </label>
-
-          {/* Text column — required for text mode, optional for full mode */}
-          {showTextField && (
-            <label style={styles.field}>
-              <span style={styles.fieldLabel}>
-                Text column
-                {isFullMode && (
-                  <span style={styles.optionalBadge} aria-label="optional">
-                    optional
-                  </span>
-                )}
-              </span>
-              <input
-                type="text"
-                value={textColumn}
-                onChange={(e) => setTextColumn(e.target.value)}
-                placeholder={
-                  isFullMode
-                    ? "e.g. review_text (leave blank if none)"
-                    : "e.g. review_text"
-                }
-                style={styles.input}
-                aria-label={
-                  isFullMode
-                    ? "Text column name (optional)"
-                    : "Text column name"
-                }
-                autoComplete="off"
-              />
-            </label>
-          )}
 
           {/* Submit button */}
           <button
@@ -246,7 +200,6 @@ function AuditForm({
         </div>
       </form>
 
-      <p style={styles.hint}>{getHintText()}</p>
     </div>
   );
 }

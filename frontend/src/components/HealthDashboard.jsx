@@ -1,8 +1,9 @@
 import { PieChart, Pie, Cell } from "recharts";
+import DatasetChat from "./DatasetChat";
 
 const statusColors = {
   excellent: "var(--color-green, #22c55e)",
-  strong: "var(--color-purple, #a855f7)",
+  strong: "var(--text-primary)",
   warning: "#f59e0b",
   critical: "#ef4444",
 };
@@ -108,13 +109,39 @@ const cardStyles = {
     gap: "1rem",
   },
   downloadButton: {
-    backgroundColor: "var(--color-purple)",
-    color: "var(--text-primary)",
+    backgroundColor: "var(--text-primary)",
+    color: "#000000",
     border: "none",
     borderRadius: 12,
     padding: "0.85rem 1.2rem",
     cursor: "pointer",
     fontWeight: 700,
+  },
+  domainAlert: {
+    borderRadius: 18,
+    padding: "1rem 1.25rem",
+    backgroundColor: "rgba(245, 158, 11, 0.12)",
+    borderLeft: "4px solid #f59e0b",
+    border: "1px solid rgba(245, 158, 11, 0.35)",
+    borderLeftWidth: "4px",
+    color: "var(--text-primary)",
+    fontSize: "0.95rem",
+    lineHeight: 1.5,
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "0.6rem",
+  },
+  domainAlertIcon: {
+    fontSize: "1.1rem",
+    lineHeight: 1.4,
+  },
+  intentLine: {
+    margin: 0,
+    color: "var(--text-secondary)",
+    fontSize: "0.8rem",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
 };
 
@@ -140,16 +167,42 @@ function selectRingColor(score) {
   return statusColors.critical;
 }
 
-function HealthDashboard({ result }) {
+function HealthDashboard({ result, projectIntent }) {
   const overallScore = Number(result.overall_score ?? 0);
   const ringColor = selectRingColor(overallScore);
+
+  // Domain-aware relevance engine outputs (null when no intent was supplied)
+  const domainScore =
+    result.domain_suitability_score === null || result.domain_suitability_score === undefined
+      ? null
+      : Number(result.domain_suitability_score);
+  const hasProjectIntent = Boolean(projectIntent?.trim());
+  const domainWarning = result.domain_warning || null;
+  const domainStatusLabel =
+    domainScore === null
+      ? ""
+      : domainScore >= 60
+      ? "Strong semantic match"
+      : domainScore >= 40
+      ? "Moderate semantic match"
+      : "Weak semantic match";
+  const domainStatusColor =
+    domainScore === null ? "" : domainScore >= 60 ? "#22c55e" : domainScore >= 40 ? "#f59e0b" : "#ef4444";
+
+  // True when no real text column existed and row text was synthesized from
+  // numeric/categorical features: the text-based scores are low-confidence then.
+  const textIsSynthetic = Boolean(result.text_summary?.text_is_synthetic);
+  const lowConfidence = textIsSynthetic ? " (low confidence)" : "";
 
   const metrics = [
     { label: "Missing Values", score: result.score_breakdown?.missing_values ?? 0 },
     { label: "Class Balance", score: result.score_breakdown?.class_balance ?? 0 },
     { label: "Duplicates", score: result.score_breakdown?.duplicates ?? 0 },
-    { label: "Label Noise", score: result.score_breakdown?.label_noise ?? 0 },
-    { label: "Semantic Consistency", score: result.score_breakdown?.semantic_consistency ?? 0 },
+    { label: `Label Noise${lowConfidence}`, score: result.score_breakdown?.label_noise ?? 0 },
+    {
+      label: `Semantic Consistency${lowConfidence}`,
+      score: result.score_breakdown?.semantic_consistency ?? 0,
+    },
   ];
 
   const issues = Array.isArray(result.issues) ? result.issues : [];
@@ -245,7 +298,56 @@ function HealthDashboard({ result }) {
             );
           })}
         </div>
+        {/* Keep the domain card visible when intent was supplied but no text
+            column was selected, so the missing prerequisite is explicit. */}
+        {hasProjectIntent && (
+          <div style={cardStyles.metricCard}>
+            <p style={cardStyles.label}>Domain Suitability</p>
+            {domainScore === null ? (
+              <p style={{ ...cardStyles.statusText, color: "var(--text-secondary)", marginTop: 0 }}>
+                Text column required to calculate domain suitability.
+              </p>
+            ) : (
+              <>
+                <p style={cardStyles.value}>{domainScore.toFixed(2)}</p>
+                <span style={{ ...cardStyles.statusText, color: domainStatusColor }}>
+                  {domainStatusLabel} — {domainScore} / 100
+                </span>
+                <div style={cardStyles.progressOuter}>
+                  <div style={cardStyles.progressInner(domainScore)} />
+                </div>
+              </>
+            )}
+            {hasProjectIntent && (
+              <p style={cardStyles.intentLine} title={projectIntent}>
+                Intent: {projectIntent}
+              </p>
+            )}
+          </div>
+        )}
       </div>
+
+      {textIsSynthetic && (
+        <div style={cardStyles.domainAlert} role="note">
+          <span style={cardStyles.domainAlertIcon} aria-hidden="true">
+            ℹ
+          </span>
+          <span>
+            No natural-language text column was found, so row text was built from the feature values.
+            Label Noise, Semantic Consistency and Domain Suitability are low-confidence for this dataset
+            and are excluded from the overall score. Rely on Missing Values, Class Balance and Duplicates.
+          </span>
+        </div>
+      )}
+
+      {domainWarning && (
+        <div style={cardStyles.domainAlert} role="alert">
+          <span style={cardStyles.domainAlertIcon} aria-hidden="true">
+            ⚠
+          </span>
+          <span>{domainWarning}</span>
+        </div>
+      )}
 
       <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "1.25fr 0.75fr" }}>
         <div style={{ display: "grid", gap: "1rem" }}>
@@ -315,8 +417,8 @@ function HealthDashboard({ result }) {
                     <span
                       style={{
                         ...cardStyles.badge,
-                        color: "var(--color-purple)",
-                        backgroundColor: "rgba(168, 85, 247, 0.12)",
+                        color: "var(--text-primary)",
+                        backgroundColor: "var(--bg-input)",
                       }}
                     >
                       Priority {strategy.priority}
@@ -358,6 +460,8 @@ function HealthDashboard({ result }) {
           </button>
         </div>
       </div>
+
+      {result.text_summary?.text_column && <DatasetChat fileId={result.file_id} />}
     </div>
   );
 }

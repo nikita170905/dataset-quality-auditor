@@ -35,7 +35,20 @@ def compute_health_score(tabular_result: dict, text_result: dict | None) -> dict
         penalty_balance = 18.0
     else:
         penalty_balance = 20.0
-    sub_score_balance = clamp(100.0 - (penalty_balance * 5.0), 0.0, 100.0)
+    # Display sub-score, aligned with the advisor's severities and the dashboard's
+    # colour bands (>80 healthy, >60 needs attention, else critical):
+    #   ratio <= 3 healthy | 3-5 INFO | 5-10 WARNING | > 10 CRITICAL
+    # (The overall-score penalty above is unchanged.)
+    if ratio is None or ratio <= 1.5:
+        sub_score_balance = 100.0
+    elif ratio <= 3.0:
+        sub_score_balance = 90.0
+    elif ratio <= 5.0:
+        sub_score_balance = 70.0
+    elif ratio <= 10.0:
+        sub_score_balance = 62.0
+    else:
+        sub_score_balance = 20.0
 
     dup_count = int(tabular_result.get("duplicate_rows", {}).get("count", 0))
     row_count = int(tabular_result.get("row_count", 1))
@@ -52,13 +65,29 @@ def compute_health_score(tabular_result: dict, text_result: dict | None) -> dict
         noise_count = len(text_result.get("label_noise_issues", []))
         text_row_count = int(text_result.get("row_count", 1))
         noise_fraction = noise_count / text_row_count if text_row_count > 0 else 0.0
-        penalty_label_noise = min(noise_fraction * 100.0 * 0.25, 25.0)
-        sub_score_label_noise = clamp(100.0 - (noise_fraction * 100.0), 0.0, 100.0)
+        measured_label_score = text_result.get("label_noise_score")
+        if measured_label_score is None:
+            penalty_label_noise = min(noise_fraction * 100.0 * 0.25, 25.0)
+            sub_score_label_noise = clamp(100.0 - (noise_fraction * 100.0), 0.0, 100.0)
+        else:
+            sub_score_label_noise = clamp(float(measured_label_score), 0.0, 100.0)
+            penalty_label_noise = (100.0 - sub_score_label_noise) * 0.25
 
         incon_count = len(text_result.get("semantic_inconsistencies", []))
         incon_fraction = incon_count / text_row_count if text_row_count > 0 else 0.0
-        penalty_semantic = min(incon_fraction * 100.0 * 0.20, 20.0)
-        sub_score_semantic = clamp(100.0 - (incon_fraction * 100.0), 0.0, 100.0)
+        measured_semantic_score = text_result.get("semantic_consistency_score")
+        if measured_semantic_score is None:
+            penalty_semantic = min(incon_fraction * 100.0 * 0.20, 20.0)
+            sub_score_semantic = clamp(100.0 - (incon_fraction * 100.0), 0.0, 100.0)
+        else:
+            sub_score_semantic = clamp(float(measured_semantic_score), 0.0, 100.0)
+            penalty_semantic = (100.0 - sub_score_semantic) * 0.20
+
+    # Text checks run on text synthesized from numeric/categorical features are
+    # low-confidence: keep them visible in the breakdown but out of the grade.
+    if text_result is not None and text_result.get("text_is_synthetic"):
+        penalty_label_noise = 0.0
+        penalty_semantic = 0.0
 
     overall_score = clamp(
         100.0

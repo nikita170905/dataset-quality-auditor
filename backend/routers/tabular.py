@@ -4,8 +4,13 @@ import pandas as pd
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from schemas.tabular_schemas import AuditRequest, AuditResponse, FileUploadResponse
+from services.schema_service import infer_schema
 from services.tabular_service import compute_tabular_audit
 from storage import get_file_bytes, store_file_bytes
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -27,7 +32,28 @@ async def upload_csv(file: UploadFile = File(...)) -> FileUploadResponse:
         )
 
     file_id = store_file_bytes(content)
-    return FileUploadResponse(file_id=file_id)
+
+    # ML-driven schema auto-detection: profile the first 1000 rows to guess
+    # the text and label columns so the frontend can pre-select them. This is
+    # best effort — an inference failure must never fail the upload itself.
+    inferred_text_column = None
+    inferred_label_column = None
+    columns: list[str] = []
+    try:
+        df_head = pd.read_csv(io.BytesIO(content), nrows=1000)
+        columns = [str(c) for c in df_head.columns]
+        schema_guess = infer_schema(df_head)
+        inferred_text_column = schema_guess["inferred_text_column"]
+        inferred_label_column = schema_guess["inferred_label_column"]
+    except Exception as exc:
+        logger.warning("Schema auto-detection failed for upload: %s", exc)
+
+    return FileUploadResponse(
+        file_id=file_id,
+        columns=columns,
+        inferred_text_column=inferred_text_column,
+        inferred_label_column=inferred_label_column,
+    )
 
 
 @router.post("/audit", response_model=AuditResponse)

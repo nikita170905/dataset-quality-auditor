@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from schemas.tabular_schemas import (
@@ -21,10 +21,14 @@ from services.advisor import generate_augmentation_strategies, generate_issues
 from services.scorer import compute_health_score
 from services.tabular_service import compute_tabular_audit
 from services.text_service import (
+    compute_label_noise_score,
+    compute_domain_relevance,
+    compute_semantic_consistency_score,
     detect_label_noise,
     detect_semantic_inconsistencies,
     detect_spurious_correlations,
 )
+from services.rag_service import ingest_dataset
 from storage import get_file_bytes
 
 logger = logging.getLogger(__name__)
@@ -32,9 +36,37 @@ router = APIRouter(prefix="/audit", tags=["Full Audit"])
 
 # Configure dedicated background thread worker pool for CPU-bound tasks
 executor = ThreadPoolExecutor(max_workers=3)
+AUTO_TEXT_COLUMN = "__auto_dataset_text"
 
 
-async def run_text_audits_parallel(df: pd.DataFrame, text_col: str, label_col: str) -> tuple[list, list, dict]:
+def _resolve_analysis_text(
+    df: pd.DataFrame,
+    requested_text_column: str | None,
+    label_column: str,
+) -> tuple[pd.DataFrame, str]:
+    """Use the inferred text column or serialize feature rows for any dataset type."""
+    if requested_text_column and requested_text_column in df.columns:
+        return df, requested_text_column
+
+    feature_columns = [column for column in df.columns if column != label_column]
+    source_columns = feature_columns or list(df.columns)
+    analysis_df = df.copy()
+    analysis_df[AUTO_TEXT_COLUMN] = analysis_df[source_columns].apply(
+        lambda row: " | ".join(
+            f"{column}: {value}"
+            for column, value in row.items()
+            if pd.notna(value) and str(value).strip()
+        ),
+        axis=1,
+    )
+    return analysis_df, AUTO_TEXT_COLUMN
+
+
+async def run_text_audits_parallel(
+    df: pd.DataFrame,
+    text_col: str,
+    label_col: str,
+) -> tuple[list, list, dict, float, float]:
     """Executes NLP and Cleanlab validation passes concurrently across separate worker threads.
 
     Args:
@@ -52,18 +84,25 @@ async def run_text_audits_parallel(df: pd.DataFrame, text_col: str, label_col: s
             return await loop.run_in_executor(executor, fn, *args)
         except Exception as e:
             logger.error(f"Parallel streaming sub-task function {fn.__name__} failed: {e}", exc_info=True)
+            if fn.__name__.endswith("_score"):
+                return 50.0
             return {} if fn.__name__ == "detect_spurious_correlations" else []
 
     results = await asyncio.gather(
         run(detect_semantic_inconsistencies, df, text_col, label_col),
         run(detect_label_noise, df, text_col, label_col),
         run(detect_spurious_correlations, df, text_col, label_col),
+        run(compute_semantic_consistency_score, df, text_col, label_col),
+        run(compute_label_noise_score, df, text_col, label_col),
     )
-    return results[0], results[1], results[2]
+    return results[0], results[1], results[2], results[3], results[4]
 
 
 @router.post("/full", response_model=HealthScoreReport)
-async def run_full_dataset_audit(request: FullAuditRequest) -> HealthScoreReport:
+async def run_full_dataset_audit(
+    request: FullAuditRequest,
+    background_tasks: BackgroundTasks,
+) -> HealthScoreReport:
     """Orchestrates a synchronous end-to-end dataset quality evaluation pass using non-blocking thread workers.
 
     Args:
@@ -106,24 +145,48 @@ async def run_full_dataset_audit(request: FullAuditRequest) -> HealthScoreReport
         )
 
     text_result: Optional[dict] = None
-    if request.text_column is not None:
-        if request.text_column not in df.columns:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"text_column '{request.text_column}' not found.",
-            )
+    domain_result: dict = {"domain_suitability_score": None, "domain_warning": None}
+    analysis_df, analysis_text_column = _resolve_analysis_text(
+        df,
+        request.text_column,
+        request.label_column,
+    )
+    if analysis_text_column:
 
-        semantic_inconsistencies, label_noise_issues, spurious_correlations = \
-            await run_text_audits_parallel(df, request.text_column, request.label_column)
+        semantic_inconsistencies, label_noise_issues, spurious_correlations, semantic_score, label_noise_score = \
+            await run_text_audits_parallel(analysis_df, analysis_text_column, request.label_column)
+
+        # Domain-aware relevance: only when the user supplied a project intent.
+        if request.project_intent:
+            try:
+                domain_result = compute_domain_relevance(
+                    analysis_df,
+                    analysis_text_column,
+                    request.project_intent,
+                )
+            except Exception as exc:
+                logger.error("Domain relevance check failed for file_id=%s: %s", request.file_id, exc, exc_info=True)
 
         text_result = {
             "row_count": len(df),
-            "text_column": request.text_column,
+            "text_column": analysis_text_column,
+            "text_is_synthetic": analysis_text_column == AUTO_TEXT_COLUMN,
             "label_column": request.label_column,
             "semantic_inconsistencies": semantic_inconsistencies,
             "label_noise_issues": label_noise_issues,
             "spurious_correlations": spurious_correlations,
+            "semantic_consistency_score": semantic_score,
+            "label_noise_score": label_noise_score,
+            "domain_suitability_score": domain_result["domain_suitability_score"],
+            "domain_warning": domain_result["domain_warning"],
         }
+        background_tasks.add_task(
+            ingest_dataset,
+            analysis_df.copy(),
+            request.file_id,
+            analysis_text_column,
+            request.label_column,
+        )
 
     score_data = compute_health_score(tabular_result, text_result)
     issues_list = generate_issues(tabular_result, text_result, score_data["score_breakdown"])
@@ -138,11 +201,16 @@ async def run_full_dataset_audit(request: FullAuditRequest) -> HealthScoreReport
         augmentation_strategies=[AugmentationStrategy(**strategy) for strategy in strategies_list],
         tabular_summary=tabular_result,
         text_summary=text_result,
+        domain_suitability_score=domain_result["domain_suitability_score"],
+        domain_warning=domain_result["domain_warning"],
     )
 
 
 @router.post("/full/stream")
-async def audit_full_streaming(request: FullAuditRequest) -> StreamingResponse:
+async def audit_full_streaming(
+    request: FullAuditRequest,
+    background_tasks: BackgroundTasks,
+) -> StreamingResponse:
     """Orchestrates an end-to-end dataset quality evaluation pass by pushing
 
     real-time progress telemetry frames via Server-Sent Events (SSE).
@@ -183,31 +251,57 @@ async def audit_full_streaming(request: FullAuditRequest) -> StreamingResponse:
 
         yield send("tabular", 45, "Tabular audit complete safely.")
         text_result = None
-
-        if request.text_column:
-            if request.text_column not in df.columns:
-                yield send("error", 0, f"text_column '{request.text_column}' not found.")
-                return
+        domain_result: dict = {"domain_suitability_score": None, "domain_warning": None}
+        analysis_df, analysis_text_column = _resolve_analysis_text(
+            df,
+            request.text_column,
+            request.label_column,
+        )
+        if analysis_text_column:
 
             yield send("text", 50, "Launching parallel NLP worker threads (Inconsistencies, Noise, Correlations)...")
             
             try:
                 # Maintain FIX 3 performance optimization within the stream loop
-                semantic, noise, spurious = await run_text_audits_parallel(
-                    df, request.text_column, request.label_column
+                semantic, noise, spurious, semantic_score, label_noise_score = await run_text_audits_parallel(
+                    analysis_df, analysis_text_column, request.label_column
                 )
             except Exception as exc:
                 logger.error(f"Parallel text streaming block encountered a fault: {exc}", exc_info=True)
                 semantic, noise, spurious = [], [], {}
+                semantic_score, label_noise_score = 50.0, 50.0
+
+            # Domain-aware relevance: only when the user supplied a project intent.
+            if request.project_intent:
+                try:
+                    domain_result = compute_domain_relevance(
+                        analysis_df,
+                        analysis_text_column,
+                        request.project_intent,
+                    )
+                except Exception as exc:
+                    logger.error(f"Domain relevance check failed for file_id={request.file_id}: {exc}", exc_info=True)
 
             text_result = {
                 "row_count": len(df),
-                "text_column": request.text_column,
+                "text_column": analysis_text_column,
+            "text_is_synthetic": analysis_text_column == AUTO_TEXT_COLUMN,
                 "label_column": request.label_column,
                 "semantic_inconsistencies": semantic,
                 "label_noise_issues": noise,
-                "spurious_correlations": spurious
+                "spurious_correlations": spurious,
+                "semantic_consistency_score": semantic_score,
+                "label_noise_score": label_noise_score,
+                "domain_suitability_score": domain_result["domain_suitability_score"],
+                "domain_warning": domain_result["domain_warning"],
             }
+            background_tasks.add_task(
+                ingest_dataset,
+                analysis_df.copy(),
+                request.file_id,
+                analysis_text_column,
+                request.label_column,
+            )
 
         yield send("scoring", 90, "Assembling quality score breakdown metrics...")
         try:
@@ -223,6 +317,8 @@ async def audit_full_streaming(request: FullAuditRequest) -> StreamingResponse:
                 "augmentation_strategies": strategies,
                 "tabular_summary": tabular_result,
                 "text_summary": text_result,
+                "domain_suitability_score": domain_result["domain_suitability_score"],
+                "domain_warning": domain_result["domain_warning"],
                 "health_hints": []
             }
         except Exception as exc:
@@ -236,6 +332,7 @@ async def audit_full_streaming(request: FullAuditRequest) -> StreamingResponse:
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
+        background=background_tasks,
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

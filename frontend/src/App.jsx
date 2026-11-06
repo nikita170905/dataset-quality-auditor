@@ -4,33 +4,24 @@ import UploadBox from "./components/UploadBox";
 import AuditForm from "./components/AuditForm";
 import ResultsPanel from "./components/ResultsPanel";
 import HealthDashboard from "./components/HealthDashboard";
+import DynamicLoader from "./components/DynamicLoader";
+import LandingPage from "./pages/LandingPage";
 
-function App() {
+function Workspace() {
   const [fileId, setFileId] = useState("");
   const [auditResult, setAuditResult] = useState(null);
   const [uploadLoading, setUploadLoading] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
   const [error, setError] = useState("");
   const [auditMode, setAuditMode] = useState("tabular");
-  const [textColumn, setTextColumn] = useState("text");
-
-  // FIX 7: Real-time telemetry tracking state variables
-  const [auditProgress, setAuditProgress] = useState(0);
-  const [auditStage, setAuditStage] = useState("");
-
-  // State hook for theme management - defaulting to dark mode cleanly
-  const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
-
-  // Effect sync engine to dynamically append attributes onto the DOM root window
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    if (theme === "dark") {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-    }
-    localStorage.setItem("theme", theme);
-  }, [theme]);
+  // Column guesses returned by the backend schema auto-detection on upload;
+  // AuditForm adopts them as its initial dropdown selections.
+  const [inferredTextColumn, setInferredTextColumn] = useState("");
+  const [inferredLabelColumn, setInferredLabelColumn] = useState("");
+  const [columns, setColumns] = useState([]);
+  // Optional free-text description of what the user is building; powers the
+  // domain-aware relevance check on the backend.
+  const [projectIntent, setProjectIntent] = useState("");
 
   const handleUpload = async (file) => {
     setError("");
@@ -39,10 +30,14 @@ function App() {
     setFileId("");
     try {
       const result = await uploadFile(file);
-      if (!result || !result.file_id) {
+      if (!result || !result.fileId) {
         throw new Error("Upload failed. Backend did not return a file_id.");
       }
-      setFileId(result.file_id);
+      setFileId(result.fileId);
+      setColumns(result.columns ?? []);
+      // Capture the schema guesses so AuditForm can pre-select the columns.
+      setInferredTextColumn(result.inferredTextColumn ?? "");
+      setInferredLabelColumn(result.inferredLabelColumn ?? "");
     } catch (err) {
       setError(err?.message || String(err) || "Upload failed.");
     } finally {
@@ -50,31 +45,35 @@ function App() {
     }
   };
 
-  const handleAudit = async (labelColumn, incomingTextCol = null) => {
+  const handleAudit = async (intentDescription = "") => {
     setError("");
+
+    const labelColumn = inferredLabelColumn?.trim();
+    const textColumn = inferredTextColumn?.trim() || null;
+    if (!labelColumn) {
+      setError("Could not auto-detect a label column. Please check your dataset.");
+      return;
+    }
+
+    if (auditMode === "text" && !textColumn) {
+      setError("No text column detected. Choose one below, or use Full Dataset Audit.");
+      return;
+    }
+
     setAuditLoading(true);
-    
-    // Clear and initialize loading trackers cleanly before starting the event connection stream
-    setAuditProgress(0);
-    setAuditStage("Initializing audit session...");
 
     try {
       let result;
       if (auditMode === "full") {
-        const targetTextCol = incomingTextCol || textColumn;
-        // Utilize the real-time progress chunk consumer stream
         result = await runFullAuditStreaming(
           fileId,
           labelColumn,
-          targetTextCol,
-          (pct, msg) => {
-            setAuditProgress(pct);
-            setAuditStage(msg);
-          }
+          textColumn,
+          () => {},
+          intentDescription
         );
       } else if (auditMode === "text") {
-        const targetTextCol = incomingTextCol || textColumn;
-        result = await runTextAudit(fileId, targetTextCol, labelColumn);
+        result = await runTextAudit(fileId, textColumn, labelColumn, intentDescription);
       } else {
         result = await runAudit(fileId, labelColumn);
       }
@@ -84,14 +83,6 @@ function App() {
     } finally {
       setAuditLoading(false);
     }
-  };
-
-  const handleReset = () => {
-    setFileId("");
-    setAuditResult(null);
-    setError("");
-    setAuditProgress(0);
-    setAuditStage("");
   };
 
   const steps = [
@@ -110,10 +101,6 @@ function App() {
   ];
 
   const isFullReport = auditResult && auditResult.overall_score !== undefined;
-
-  const toggleTheme = () => {
-    setTheme((prevTheme) => (prevTheme === "dark" ? "light" : "dark"));
-  };
 
   return (
     <div
@@ -155,48 +142,6 @@ function App() {
               alignItems: "center",
             }}
           >
-            <button
-              onClick={toggleTheme}
-              style={{
-                backgroundColor: "var(--bg-surface)",
-                border: "1px solid var(--border-color)",
-                color: "var(--text-primary)",
-                padding: "0.5rem 1rem",
-                borderRadius: "20px",
-                cursor: "pointer",
-                fontSize: "0.85rem",
-                fontWeight: "600",
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-                transition: "all 0.2s ease-in-out",
-              }}
-            >
-              {theme === "dark" ? (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="5"></circle>
-                    <line x1="12" y1="1" x2="12" y2="3"></line>
-                    <line x1="12" y1="21" x2="12" y2="23"></line>
-                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                    <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                    <line x1="1" y1="12" x2="3" y2="12"></line>
-                    <line x1="21" y1="12" x2="23" y2="12"></line>
-                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                    <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-                  </svg>
-                  <span>Light Mode</span>
-                </>
-              ) : (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-                  </svg>
-                  <span>Dark Mode</span>
-                </>
-              )}
-            </button>
           </div>
 
           <div style={{ textAlign: "center", marginTop: "1rem" }}>
@@ -248,8 +193,8 @@ function App() {
                   borderRadius: "50%",
                   display: "grid",
                   placeItems: "center",
-                  backgroundColor: step.active ? "var(--color-purple, #6366f1)" : "transparent",
-                  border: `1px solid ${step.active ? "var(--color-purple, #6366f1)" : "var(--border-color)"}`,
+                  backgroundColor: step.active ? "var(--text-primary)" : "transparent",
+                  border: `1px solid ${step.active ? "var(--text-primary)" : "var(--border-color)"}`,
                   color: step.active ? "#ffffff" : "var(--text-secondary)",
                   fontSize: "0.9rem",
                   fontWeight: 700,
@@ -297,10 +242,12 @@ function App() {
             display: "flex",
             flexDirection: "column",
             gap: "1.5rem",
-            boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)",
           }}
         >
-          <UploadBox handleUpload={handleUpload} uploadLoading={uploadLoading} />
+          <UploadBox
+            handleUpload={handleUpload}
+            uploadLoading={uploadLoading}
+          />
 
           {fileId && (
             <div
@@ -329,61 +276,31 @@ function App() {
             </div>
           )}
 
-          {fileId && (
+          {fileId && !auditLoading && (
             <AuditForm
+              key={fileId}
               handleAudit={handleAudit}
               auditLoading={auditLoading}
-              fileId={fileId}
               auditMode={auditMode}
               setAuditMode={setAuditMode}
-              textColumn={textColumn}
-              setTextColumn={setTextColumn}
+              projectIntent={projectIntent}
+              setProjectIntent={setProjectIntent}
+              columns={columns}
+              labelColumn={inferredLabelColumn}
+              setLabelColumn={setInferredLabelColumn}
+              textColumn={inferredTextColumn}
+              setTextColumn={setInferredTextColumn}
             />
           )}
 
-          {/* FIX 7: Incremental progress loader panel tracking active stream frames */}
           {auditLoading && (
-            <div
-              role="status"
-              aria-live="polite"
-              aria-label="Audit in progress"
-              style={{ 
-                padding: "24px", 
-                textAlign: "center",
-                borderTop: "1px solid var(--border-color)",
-                marginTop: "0.5rem"
-              }}
-            >
-              <p style={{ color: "var(--text-primary)", marginBottom: "12px", fontSize: "14px", fontWeight: "500" }}>
-                {auditStage || "Initializing dataset audit analysis..."}
-              </p>
-              <div
-                role="progressbar"
-                aria-valuenow={auditProgress}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                style={{ background: "var(--bg-app)", borderRadius: "8px", height: "8px", overflow: "hidden" }}
-              >
-                <div
-                  style={{
-                    width: `${auditProgress}%`,
-                    height: "100%",
-                    background: "var(--color-purple, #6366f1)",
-                    transition: "width 0.4s ease",
-                    borderRadius: "8px"
-                  }}
-                />
-              </div>
-              <p style={{ color: "var(--text-secondary)", fontSize: "12px", marginTop: "8px", fontWeight: "500" }}>
-                {auditProgress}% complete
-              </p>
-            </div>
+            <DynamicLoader isLoading={auditLoading} />
           )}
         </div>
 
         {auditResult ? (
           isFullReport ? (
-            <HealthDashboard result={auditResult} />
+            <HealthDashboard result={auditResult} projectIntent={projectIntent} />
           ) : (
             <ResultsPanel result={auditResult} />
           )
@@ -391,6 +308,10 @@ function App() {
       </div>
     </div>
   );
+}
+
+function App() {
+  return window.location.pathname === "/workspace" ? <Workspace /> : <LandingPage />;
 }
 
 export default App;

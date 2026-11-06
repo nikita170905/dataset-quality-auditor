@@ -7,6 +7,11 @@ from pydantic import BaseModel
 
 class FileUploadResponse(BaseModel):
     file_id: str
+    # Schema auto-detection guesses made by profiling the first ~1000 rows.
+    # Either can be None when no column matched the heuristics.
+    inferred_text_column: Optional[str] = None
+    inferred_label_column: Optional[str] = None
+    columns: List[str] = []
 
 
 class AuditRequest(BaseModel):
@@ -57,6 +62,9 @@ class TextAuditRequest(BaseModel):
     file_id: str
     text_column: str
     label_column: str
+    # Optional free-text description of the user's project goal; when present,
+    # the backend runs the domain relevance check against the text column.
+    project_intent: Optional[str] = None
 
 
 class TextAuditResponse(BaseModel):
@@ -70,6 +78,9 @@ class TextAuditResponse(BaseModel):
     inconsistency_count: int
     noise_issue_count: int
     health_hints: list[str]
+    # Domain-aware relevance engine outputs (None when no project_intent given)
+    domain_suitability_score: Optional[float] = None
+    domain_warning: Optional[str] = None
 
 
 class IssueItem(BaseModel):
@@ -91,6 +102,10 @@ class FullAuditRequest(BaseModel):
     label_column: str
     text_column: Optional[str] = None
     # text_column is optional — if None, we skip text NLP audit sequences
+    # Optional free-text description of the user's project goal; when present
+    # (and a text_column is analyzed), the backend runs the domain relevance
+    # check against the text column semantics.
+    project_intent: Optional[str] = None
 
 
 class HealthScoreReport(BaseModel):
@@ -103,3 +118,7 @@ class HealthScoreReport(BaseModel):
     augmentation_strategies: list[AugmentationStrategy]
     tabular_summary: dict                 # raw tabular audit JSON payload details
     text_summary: Optional[dict] = None   # None if no text_column was assigned or analyzed
+    # Domain-aware relevance engine outputs (None when no project_intent given
+    # or no text column was analyzed)
+    domain_suitability_score: Optional[float] = None
+    domain_warning: Optional[str] = None

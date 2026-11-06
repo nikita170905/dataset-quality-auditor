@@ -1,21 +1,42 @@
-# Block local virtual environments from uploading to GitHub
+# Virtual Environments
 .venv/
 venv/
 env/
 ENV/
+pyvenv.cfg
 
-# Block local node package distributions
+# Node modules & build files
 node_modules/
 dist/
+
+# Environment variables
 .env
 
-# Block cache and system artifacts
+# Python cache and testing artifacts
 __pycache__/
+**/__pycache__/
 *.pyc
-.DS_Store
-*.log
-.vscode/
-pyvenv.cfg
 *.pyo
 *.pyd
 .pytest_cache/
+
+# Data, reports, and custom test directories
+datasets/
+test_data/
+flip_test/
+report*.json
+report.py
+30_paircheck.py
+flip_test.py
+grid_search.py
+make_test_datasets.py
+*.npy
+
+# System, IDE, and Logs
+.DS_Store
+.vscode/
+*.log
+
+# Cloud and miscellaneous
+.cloud-attachments/
+.freebuff/

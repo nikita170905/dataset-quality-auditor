@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import full_audit, tabular, text
+from routers import chat, full_audit, tabular, text
 from services.text_service import get_embedding_model
 
 # Setup core logging parameters
@@ -30,9 +30,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS allowlist — must include every origin the frontend is actually served
+# from. Vite increments the port (5173, 5174, ...) when a dev server is already
+# listening, so a running instance on 5173 pushes a second one to 5174.
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,3 +56,4 @@ def root() -> dict[str, str]:
 app.include_router(tabular.router, prefix="/api")
 app.include_router(text.router, prefix="/api")
 app.include_router(full_audit.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")

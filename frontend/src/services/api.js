@@ -18,10 +18,12 @@ async function handleResponse(response) {
 }
 
 /**
- * Streams local multi-part form data files to memory cache endpoints.
+ * Streams local multi-part form data files to memory cache endpoints and
+ * surfaces the backend schema auto-detection guesses.
  *
  * @param {File} file - Raw target document file object.
- * @returns {Promise<object>} Contains unique file_id system token mappings.
+ * @returns {Promise<object>} { fileId, inferredTextColumn, inferredLabelColumn }
+ *   where the inferred columns are null when no heuristic matched.
  */
 export async function uploadFile(file) {
   const formData = new FormData();
@@ -31,7 +33,13 @@ export async function uploadFile(file) {
     headers: { "Content-Type": "multipart/form-data" },
   });
 
-  return handleResponse(response);
+  const data = await handleResponse(response);
+  return {
+    fileId: data.file_id,
+    inferredTextColumn: data.inferred_text_column ?? null,
+    inferredLabelColumn: data.inferred_label_column ?? null,
+    columns: Array.isArray(data.columns) ? data.columns : [],
+  };
 }
 
 /**
@@ -49,11 +57,12 @@ export async function runAudit(file_id, label_column) {
 /**
  * Triggers synchronous semantic language sweeps for dataset columns.
  */
-export async function runTextAudit(file_id, text_column, label_column) {
+export async function runTextAudit(file_id, text_column, label_column, project_intent) {
   const response = await axios.post(`${API_BASE_URL}/audit/text`, {
     file_id,
     text_column,
     label_column,
+    project_intent: project_intent || null,
   });
 
   return handleResponse(response);
@@ -62,11 +71,25 @@ export async function runTextAudit(file_id, text_column, label_column) {
 /**
  * Triggers complete synchronous multi-tier sweeps across all available vectors.
  */
-export async function runFullAudit(file_id, label_column, text_column) {
+export async function runFullAudit(file_id, label_column, text_column, project_intent) {
   const response = await axios.post(`${API_BASE_URL}/audit/full`, {
     file_id,
     label_column,
     text_column: text_column || null,
+    project_intent: project_intent || null,
+  });
+
+  return handleResponse(response);
+}
+
+/**
+ * Searches the locally indexed dataset for rows relevant to a natural-language query.
+ */
+export async function searchDataset(file_id, query, top_k = 5) {
+  const response = await axios.post(`${API_BASE_URL}/chat`, {
+    file_id,
+    query,
+    top_k,
   });
 
   return handleResponse(response);
@@ -80,16 +103,18 @@ export async function runFullAudit(file_id, label_column, text_column) {
  * @param {string} label_column - Assigned data classification column.
  * @param {string|null} text_column - Target unstructured textual column string.
  * @param {function} onProgress - Callback monitoring step percent values and state logs.
+ * @param {string|null} project_intent - Optional free-text project goal for domain relevance.
  * @returns {Promise<object|null>} The completed final HealthScoreReport payload payload.
  */
-export async function runFullAuditStreaming(file_id, label_column, text_column, onProgress) {
+export async function runFullAuditStreaming(file_id, label_column, text_column, onProgress, project_intent) {
   const response = await fetch(`${API_BASE_URL}/audit/full/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       file_id,
       label_column,
-      text_column: text_column || null
+      text_column: text_column || null,
+      project_intent: project_intent || null
     }),
   });
 
@@ -99,38 +124,50 @@ export async function runFullAuditStreaming(file_id, label_column, text_column, 
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = "";
   let finalResult = null;
+
+  // One SSE frame = one or more "data: ..." lines, terminated by a blank line.
+  // Frames (especially the final report, which can be megabytes) are often split
+  // across several network chunks, so we only parse a frame once it is complete.
+  const handleFrame = (frame) => {
+    const dataLines = frame
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""));
+    if (dataLines.length === 0) return;
+
+    const payload = JSON.parse(dataLines.join("\n"));
+    if (payload.stage === "error") {
+      throw new Error(payload.message);
+    }
+    if (payload.stage === "complete") {
+      finalResult = JSON.parse(payload.message);
+      return;
+    }
+    if (typeof onProgress === "function") {
+      onProgress(payload.progress, payload.message);
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
-    const textChunk = decoder.decode(value, { stream: true });
-    // Explode stream frames cleanly across safe newlines tracking active telemetry
-    const lines = textChunk.split("\n").filter(line => line.trim().startsWith("data: "));
-
-    for (const line of lines) {
-      try {
-        // Strip out the custom "data: " chunk signature safely
-        const payload = JSON.parse(line.slice(6));
-
-        if (payload.stage === "complete") {
-          // Unpack the comprehensive report payload directly on complete phase frames
-          finalResult = JSON.parse(payload.message);
-        } else if (payload.stage === "error") {
-          throw new Error(payload.message);
-        } else {
-          // Route tracking logs directly up to the user interface loaders
-          onProgress(payload.progress, payload.message);
-        }
-      } catch (err) {
-        // Intercept partial data fragmentations smoothly to allow streaming chunk alignment
-        if (err.message !== "Unexpected end of JSON" && !err.message.includes("is not valid JSON")) {
-          throw err;
-        }
-      }
+    buffer += decoder.decode(value, { stream: true });
+    let separator;
+    while ((separator = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      handleFrame(frame);
     }
   }
 
+  buffer += decoder.decode();
+  if (buffer.trim()) handleFrame(buffer.trim());
+
+  if (!finalResult) {
+    throw new Error("The audit stream ended before a final report was received.");
+  }
   return finalResult;
 }

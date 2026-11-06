@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from schemas.tabular_schemas import TextAuditRequest, TextAuditResponse
 from services.text_service import (
+    compute_domain_relevance,
     detect_label_noise,
     detect_semantic_inconsistencies,
     detect_spurious_correlations,
@@ -90,6 +91,23 @@ async def audit_text(request: TextAuditRequest) -> TextAuditResponse:
         )
         spurious_correlations = {}
 
+    # Domain-aware relevance: only runs when the user supplied a project intent.
+    domain_result: dict = {"domain_suitability_score": None, "domain_warning": None}
+    if request.project_intent:
+        try:
+            domain_result = compute_domain_relevance(
+                df,
+                request.text_column,
+                request.project_intent,
+            )
+        except Exception as exc:
+            logger.error(
+                "Domain relevance check failed for file_id=%s: %s",
+                request.file_id,
+                exc,
+                exc_info=True,
+            )
+
     response = TextAuditResponse(
         file_id=request.file_id,
         text_column=request.text_column,
@@ -101,6 +119,8 @@ async def audit_text(request: TextAuditRequest) -> TextAuditResponse:
         inconsistency_count=len(semantic_inconsistencies),
         noise_issue_count=len(label_noise_issues),
         health_hints=[],
+        domain_suitability_score=domain_result["domain_suitability_score"],
+        domain_warning=domain_result["domain_warning"],
     )
 
     return response
