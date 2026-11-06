@@ -1,8 +1,10 @@
 # Dataset Quality Auditor
 
-A multimodal dataset health evaluation platform built with **FastAPI** and **React**. Upload any CSV dataset and receive a structured audit report covering class imbalance, label noise, duplicate detection, missing values, and semantic inconsistencies — with a weighted health score and prioritized fix list.
+A dataset health evaluation platform built with **FastAPI** and **React**. Upload a CSV, and get a weighted **0–100 health score**, a letter grade, a prioritized list of issues with fixes, remediation strategies, and a semantic search ("Ask your dataset") over the indexed rows.
 
-> **Status:** MVP complete. Image dataset auditing is scoped for future development.
+It checks for class imbalance, label noise, duplicate rows, missing values, near-duplicate texts with conflicting labels, spurious shortcut tokens, and (optionally) how well the data matches your project goal.
+
+> **Status:** Tabular and text/NLP auditing are working. Image dataset auditing is planned but **not implemented yet**.
 
 ---
 
@@ -14,8 +16,11 @@ A multimodal dataset health evaluation platform built with **FastAPI** and **Rea
 - [Tech Stack](#tech-stack)
 - [Getting Started](#getting-started)
 - [Usage Guide](#usage-guide)
-- [Audit Metrics Explained](#audit-metrics-explained)
+- [API Reference](#api-reference)
+- [How the Audits Work](#how-the-audits-work)
+- [Health Score and Grades](#health-score-and-grades)
 - [Project Structure](#project-structure)
+- [Tuning the Label-Noise Cutoff](#tuning-the-label-noise-cutoff)
 - [Known Limitations](#known-limitations)
 - [License](#license)
 
@@ -23,65 +28,71 @@ A multimodal dataset health evaluation platform built with **FastAPI** and **Rea
 
 ## Overview
 
-**The problem:** Machine learning teams routinely waste weeks training models on flawed datasets — mislabeled samples, severe class imbalances, duplicate records, and inconsistent annotations. No unified, free tool existed to systematically diagnose these issues before training begins.
+**The problem:** ML teams often lose weeks training on flawed data: mislabeled samples, heavy class imbalance, duplicate records, inconsistent annotations, or a dataset that simply doesn't match the problem domain.
 
-**What this builds:** A pipeline that accepts a CSV dataset, runs statistical and NLP-based quality checks, and returns a `0–100` Dataset Health Score with a ranked list of detected issues and concrete remediation strategies.
+**What this does:** It accepts a CSV, auto-detects the label and text columns, runs statistical and embedding-based checks, and returns a health report you can review in the browser or download as JSON.
 
-**Who it's for:** Any ML or data science team building classification models on tabular or text data.
+**Who it's for:** Anyone building classification models on tabular or text data.
 
 ---
 
 ## Features
 
-### Backend
-- **Tabular Auditor** — class distribution, imbalance ratio, duplicate detection, missing value analysis
-- **Text NLP Auditor** — semantic inconsistency detection (via sentence embeddings), label noise estimation (via Cleanlab + confident learning), spurious token correlation (Chi-Square)
-- **Health Scoring Engine** — weighted penalty formula mapping defects to a 0–100 score with grade (A/B/C/D)
-- **Rule-Based Advisor** — deterministic issue prioritization (CRITICAL / WARNING / INFO) with fix suggestions and augmentation strategies
-- **Model Singleton** — `SentenceTransformer` loads once at server startup, cached in memory for all subsequent requests
-- **Parallel Execution** — NLP sub-audits run concurrently via `asyncio.gather` + `ThreadPoolExecutor`, reducing text audit time by ~60%
-- **Stratified Sampling** — large datasets (>5,000 rows) are sampled with class-proportion preservation before NLP processing
-- **SSE Progress Streaming** — Server-Sent Events push real-time progress to the frontend during long-running audits
+### Auditing
+- **Tabular auditor**: class distribution, imbalance ratio, exact duplicate rows, per-column missing-value percentages. Blank or whitespace-only strings count as missing.
+- **Text NLP auditor**
+  - **Label noise** via out-of-fold logistic regression on sentence embeddings (confident-learning style). Each row is scored by a model that never saw it.
+  - **Semantic inconsistencies**: near-duplicate texts (cosine > 0.95) that carry different labels.
+  - **Spurious correlations**: tokens most associated with each class (chi-square, direction-checked, HTML stripped).
+- **Domain suitability** (optional): describe your project in one line and the auditor scores how semantically close your data is to that goal.
+- **Works without a text column**: if the dataset has no free-text column, row text is built from the feature values (`col: value | col: value`). Those text-based scores are marked **low confidence** and excluded from the overall grade.
+- **Schema auto-detection on upload**: the text column is guessed from average string length (> 50 chars), and the label column from low-cardinality columns (2–9 unique values), preferring label-like names such as `label`, `target`, `sentiment`, `churn`.
 
+### Reporting
+- Weighted health score, grade (A–D), and per-dimension breakdown.
+- Rule-based advisor: issues ranked CRITICAL / WARNING / INFO, each with a concrete fix.
+- Augmentation and remediation strategies (oversampling, re-annotation, deduplication and label unification, imputation).
+- Full JSON report download.
+
+### Ask Your Dataset (RAG search)
+- After a full audit, rows are embedded in the background into an in-memory **Qdrant** collection.
+- Natural-language queries are matched by vector search, then **reranked** with a local cross-encoder (`ms-marco-MiniLM-L-6-v2`). The label is included in the indexed text, so queries like "negative reviews" work.
+- Scores shown in the UI are relative to the result set (best match = 1.0).
+
+### Engineering
+- Embedding model loaded once at startup and cached (singleton).
+- NLP sub-audits run concurrently via `asyncio.gather` and a `ThreadPoolExecutor`.
+- Stratified sampling that preserves class proportions and original row indices.
+- A Server-Sent Events endpoint for full-audit progress.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 React Frontend                           │
-│  UploadBox → AuditForm → HealthDashboard                │
-│  SSE consumer → real-time progress bar                   │
-└────────────────────┬────────────────────────────┘
-                     │ HTTP / SSE
-┌────────────────────▼────────────────────────────┐
-│               FastAPI Backend                             │
-│                                                           │
-│  POST /api/upload        → storage.py (UUID map)         │
-│  POST /api/audit         → tabular audit                 │
-│  POST /api/audit/text    → text audit                    │
-│  POST /api/audit/full    → combined pipeline             │
-│  POST /api/audit/full/stream → SSE stream                │
-└──────┬──────────────┬───────────────┬────────────┘
-         │                │                  │
-┌──────▼──────┐ ┌─────▼──────┐ ┌─────▼──────────┐
-│tabular_        │ │text_         │ │scorer.py           │
-│service.py      │ │service.py.   │ │advisor.py          │
-│(pandas)        │ │(ST + CL)     │ │(rule engine)       │
-└─────────────┘  └────────────┘ └────────────────┘
+React (Vite)                                FastAPI
+────────────                                ───────
+LandingPage ( / )
+Workspace   ( /workspace )
+  UploadBox ──────────── POST /api/upload ─────────► storage.py (UUID -> bytes)
+  AuditForm                                         schema_service.py (infer columns)
+  DynamicLoader
+  ResultsPanel ◄──────── POST /api/audit ──────────► tabular_service.py
+               ◄──────── POST /api/audit/text ─────► text_service.py
+  HealthDashboard ◄───── POST /api/audit/full/stream ► tabular + text (parallel)
+                         (SSE, final frame = report)  -> scorer.py -> advisor.py
+  DatasetChat ────────── POST /api/chat ───────────► rag_service.py (Qdrant + reranker)
+                                                      ▲ ingest runs as a background task
 ```
 
-**Key design rule:** Service layer files (`tabular_service.py`, `text_service.py`, `scorer.py`, `advisor.py`) have zero FastAPI imports — they are pure Python/Pandas and independently testable.
+**Design rule:** service modules (`tabular_service`, `text_service`, `scorer`, `advisor`, `schema_service`) contain no FastAPI imports, so they can be tested on their own.
 
-### Data Flow
-
-1. User uploads CSV → stored as raw bytes in an in-memory UUID-keyed dictionary
-2. User selects audit mode and provides column names
-3. Backend runs tabular audit (mandatory) + text audit (if text column provided)
-4. Scorer applies weighted penalty formula → overall score + grade
-5. Advisor generates ranked issue list + augmentation strategies
-6. Frontend renders full report; user can download as JSON
+### Data flow
+1. The CSV is uploaded and stored as raw bytes in an in-memory dict keyed by UUID. The backend profiles the first 1,000 rows and returns the columns plus guessed text and label columns.
+2. The user confirms or changes the columns, picks an audit mode, and optionally types a project intent.
+3. The backend runs the tabular audit, then (full audit) the text audits in parallel.
+4. `scorer.py` computes sub-scores, the overall score and the grade. `advisor.py` produces issues and strategies.
+5. The report is sent to the browser, and the dataset is indexed in the background for chat.
 
 ---
 
@@ -89,24 +100,23 @@ A multimodal dataset health evaluation platform built with **FastAPI** and **Rea
 
 | Layer | Technology |
 |---|---|
-| Backend framework | Python 3.11, FastAPI, Uvicorn |
-| Data processing | Pandas, NumPy |
-| ML / NLP | Scikit-learn, Sentence-Transformers (`all-MiniLM-L6-v2`), Cleanlab |
-| Frontend | React 19, Vite |
-| Charting | Recharts |
-| Styling | Vanilla CSS with custom variable system |
-| Concurrency | `asyncio`, `ThreadPoolExecutor` |
-| Streaming | Server-Sent Events (SSE) |
+| Backend | Python 3.10+, FastAPI, Uvicorn, Pydantic v2 |
+| Data | Pandas, NumPy |
+| ML / NLP | scikit-learn, Sentence-Transformers (`all-MiniLM-L6-v2`), CrossEncoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) |
+| Vector store | Qdrant (in-memory mode) |
+| Frontend | React 19, Vite, Axios, Recharts |
+| Styling | Plain CSS with variables (dark theme) and inline styles |
+| Concurrency | `asyncio`, `ThreadPoolExecutor` (3 workers) |
+| Streaming | Server-Sent Events |
 
 ---
 
 ## Getting Started
 
 ### Prerequisites
-
-- Python 3.11+
+- Python 3.10+
 - Node.js 18+
-- ~500 MB disk space (for `all-MiniLM-L6-v2` model weights, downloaded once)
+- Internet access on first run (downloads the embedding model, and the reranker on the first chat search; both are cached afterwards)
 
 ### 1. Backend
 
@@ -116,9 +126,9 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-The server starts at `http://localhost:8000`.
+Runs at `http://localhost:8000` (interactive docs at `/docs`). Run `uvicorn` from inside `backend/`, because the imports are `from routers import ...`.
 
-On first startup, the lifespan hook downloads and caches the sentence-transformer model. Subsequent restarts use the locally cached weights.
+On startup, a lifespan hook pre-warms the embedding model.
 
 ### 2. Frontend
 
@@ -128,122 +138,184 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in your browser.
+Open `http://localhost:5173`. The landing page is at `/`, and the app is at `/workspace`.
+
+> The API base URL is hard-coded to `http://localhost:8000/api` in `frontend/src/services/api.js`. CORS allows `localhost` / `127.0.0.1` on ports **5173** and **5174**.
 
 ---
 
 ## Usage Guide
 
-### Step 1 — Upload Dataset
-Drag and drop any `.csv` file into the upload zone. A UUID token confirms successful ingestion.
+1. **Upload**: drag and drop a `.csv`. A file token appears, and the label and text columns are pre-selected if they could be detected.
+2. **Configure**: choose a mode.
 
-### Step 2 — Configure Audit
-Select an audit mode:
+   | Mode | Runs | Needs |
+   |---|---|---|
+   | **Tabular Auditor** | Class balance, duplicates, missing values | Label column |
+   | **Text NLP Auditor** | Semantic conflicts, label noise, spurious tokens (+ domain check) | Label + text column |
+   | **Full Dataset Audit** | Everything above + health score, grade, issues, strategies, chat | Label column (text optional) |
 
-| Mode | What it runs | Required inputs |
-|---|---|---|
-| **Tabular Auditor** | Structural stats only | Label column |
-| **Text NLP Auditor** | NLP checks only | Label column + Text column |
-| **Full Dataset Audit** | Both pipelines + health score | Label column + Text column |
+   Optionally fill in **Project Intent** (e.g. `Sentiment analysis on movie reviews`) to get a Domain Suitability score.
+3. **Run the audit**: the full audit streams from the backend; the UI shows a loading indicator while it runs.
+4. **Review**: score ring and grade, five sub-score cards, prioritized issues, remediation plans, JSON download, and the **Ask your dataset** chat.
 
-### Step 3 — Run Audit
-Click **Run Audit**. A progress bar streams real-time stage updates for large datasets. Typical runtimes:
-
-| Dataset size | Tabular only | Full audit |
-|---|---|---|
-| < 2,000 rows | < 5 seconds | 20–40 seconds |
-| 2,000–10,000 rows | < 10 seconds | 60–90 seconds |
-| > 10,000 rows | < 15 seconds | 90–150 seconds (sampled) |
-
-### Step 4 — Review Results
-The dashboard shows:
-- Health score gauge (0–100) with letter grade
-- Per-dimension score breakdown
-- Prioritized issue list with fix suggestions
-- Augmentation and remediation strategies
-- JSON download button for full report
+> Tip: for intent, describe your **data domain** ("customer reviews of products"), not only the task ("sentiment analysis"). The score compares topics, not tasks.
 
 ---
 
-## Audit Metrics Explained
+## API Reference
 
-### Health Score Formula
+All routes are prefixed with `/api`.
 
-```
-Score = 100 − Σ penalties
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| POST | `/upload` | multipart `file` (.csv) | `file_id`, `columns`, `inferred_text_column`, `inferred_label_column` |
+| POST | `/audit` | `file_id`, `label_column` | Tabular audit (`class_distribution`, `imbalance_ratio`, `duplicate_rows`, `missing_values`, ...) |
+| POST | `/audit/text` | `file_id`, `text_column`, `label_column`, `project_intent?` | Inconsistencies, label-noise issues, spurious tokens, counts, domain score/warning |
+| POST | `/audit/full` | `file_id`, `label_column`, `text_column?`, `project_intent?` | `HealthScoreReport` (JSON) |
+| POST | `/audit/full/stream` | same as `/audit/full` | SSE frames `{stage, progress, message}`; the `complete` frame carries the full report as a JSON string |
+| POST | `/chat` | `file_id`, `query`, `top_k` (1–20, default 5) | `matches: [{text, score, row_index}]` |
 
-Penalty weights:
-  Missing Values      → 0.20 (max 20 pts deducted)
-  Class Imbalance     → 0.20 (max 20 pts deducted)
-  Duplicates          → 0.15 (max 15 pts deducted)
-  Label Noise         → 0.25 (max 25 pts deducted)  [text only]
-  Semantic Consistency→ 0.20 (max 20 pts deducted)  [text only]
-```
-
-### Grade Thresholds
-
-| Score | Grade | Interpretation |
-|---|---|---|
-| ≥ 90 | A | Healthy — minor issues only |
-| ≥ 75 | B | Good — some improvements recommended |
-| ≥ 60 | C | Moderate — notable issues affecting model quality |
-| < 60 | D | Poor — critical issues requiring attention before training |
-
-### Imbalance Ratio Severity
-
-| Ratio | Severity | Score Impact |
-|---|---|---|
-| ≤ 3.0 | None | 0 pts |
-| 3.0 – 5.0 | INFO | −5 pts |
-| 5.0 – 10.0 | WARNING | −12 pts |
-| > 10.0 | CRITICAL | −20 pts |
-
-> **Note:** Text audit metrics (Label Noise, Semantic Consistency) are computed on a stratified sample of up to 5,000 rows for datasets exceeding that size. Sample coverage is noted in the JSON report.
+`/chat` returns an empty list until background indexing has finished, which can take a while on large files.
 
 ---
 
+## How the Audits Work
+
+### Tabular
+- Imbalance ratio = largest class count ÷ smallest class count (missing labels count as their own class).
+- Duplicates = exact duplicate rows (first occurrence kept).
+- Missing % per column; empty or whitespace-only strings are treated as missing.
+
+### Label noise
+- Sentence embeddings, then a logistic regression (`C=1`, balanced class weights) with stratified K-fold (up to 5 folds). Classes with fewer than 2 rows are dropped.
+- A row is **flagged** when the out-of-fold probability of its given label is below **0.25** and the model prefers a different class.
+- **Learnability guard:** if balanced accuracy barely beats chance (signal < 0.15), the labels look unrelated to the text. Per-row flags are suppressed and the label-noise score is set to **30**.
+- Score = `100 − 300 × (fraction flagged)`, clamped to 0–100 (5% flagged → 85, 10% → 70, 20% → 40).
+- Flags are evidence for human review, not proof of error.
+
+### Semantic consistency
+- **Score:** for each row, find its nearest neighbour; neighbours with cosine ≥ 0.85 count as evidence. Score = % of those pairs whose labels agree. Fewer than 5 evidence rows → 100.
+- **Issue list:** pairs with cosine > 0.95 and different labels, capped at the 500 strongest.
+
+### Spurious correlations
+Chi-square per class on a bag-of-words (English stop words removed, `min_df=2`). Only tokens that are more frequent in the class than overall are returned (top 10 per class).
+
+### Domain suitability
+Mean cosine similarity between your intent and up to 50 sampled rows, calibrated from the 0.0–0.5 band onto 0–100. Below 40 triggers a warning.
+
+### Sampling caps
+
+| Check | Row cap |
+|---|---|
+| Semantic inconsistency pairs | 5,000 |
+| Label noise (detect + score) | 2,000 |
+| Semantic consistency score | 2,000 |
+| Domain relevance | 50 sampled rows |
+
+Sampling is stratified by label and keeps original row indices.
+
+---
+
+## Health Score and Grades
+
+`Overall = 100 − (missing + balance + duplicates + label noise + semantic penalties)`
+
+| Dimension | Penalty | Max |
+|---|---|---|
+| Missing values | `avg_missing% × 0.20` | 20 |
+| Class balance | by imbalance ratio (table below) | 20 |
+| Duplicates | `duplicate% × 0.15` | 15 |
+| Label noise | `(100 − label_noise_score) × 0.25` | 25 |
+| Semantic consistency | `(100 − semantic_score) × 0.20` | 20 |
+
+| Imbalance ratio | Overall penalty | Dashboard sub-score | Advisor severity |
+|---|---|---|---|
+| ≤ 1.5 | 0 | 100 | none |
+| 1.5 – 3 | 5 | 90 | none |
+| 3 – 5 | 12 | 70 | INFO |
+| 5 – 10 | 18 | 62 | WARNING |
+| > 10 | 20 | 20 | CRITICAL |
+
+If text had to be synthesized from features (no real text column), the label-noise and semantic penalties are set to 0. They remain visible, tagged "low confidence".
+
+| Score | Grade |
+|---|---|
+| ≥ 90 | A |
+| ≥ 75 | B |
+| ≥ 60 | C |
+| < 60 | D |
+
+Dashboard sub-score colors: **> 80** Healthy, **> 60** Needs Attention, otherwise Critical.
+
+---
 
 ## Project Structure
 
 ```
-project/
+dataset-quality-auditor/
+├── README.md
+├── tune_cutoff.py                  # Offline label-noise cutoff tuning tool
 ├── backend/
-│   ├── main.py                     # FastAPI app, lifespan hook, router mounts
-│   ├── storage.py                  # In-memory UUID → bytes file store
+│   ├── main.py                     # FastAPI app, CORS, lifespan model pre-warm, routers
+│   ├── storage.py                  # In-memory UUID -> bytes store
+│   ├── requirements.txt
 │   ├── routers/
 │   │   ├── tabular.py              # POST /upload, POST /audit
 │   │   ├── text.py                 # POST /audit/text
-│   │   └── full_audit.py           # POST /audit/full, POST /audit/full/stream
-│   ├── services/
-│   │   ├── tabular_service.py      # Pandas-based structural audit
-│   │   ├── text_service.py         # Embeddings, label noise, chi-square
-│   │   ├── scorer.py               # Weighted health score formula
-│   │   └── advisor.py              # Rule-based issue + strategy generator
+│   │   ├── full_audit.py           # POST /audit/full, /audit/full/stream
+│   │   └── chat.py                 # POST /chat
 │   ├── schemas/
-│   │   └── tabular_schemas.py      # All Pydantic v2 request/response models
-│   └── requirements.txt
-├── frontend/
-│   └── src/
-│       ├── App.jsx                 # State orchestrator, SSE consumer
-│       ├── services/
-│       │   └── api.js              # Fetch wrappers for all endpoints
-│       └── components/
-│           ├── UploadBox.jsx       # Drag-and-drop file ingestion
-│           ├── AuditForm.jsx       # Column input + audit mode toggle
-│           ├── ResultsPanel.jsx    # Tabular audit results display
-│           └── HealthDashboard.jsx # Full audit health report
-└── README.md
+│   │   ├── tabular_schemas.py      # Upload/audit/report Pydantic models
+│   │   └── chat_schemas.py         # Chat request/response models
+│   └── services/
+│       ├── tabular_service.py      # Pandas structural audit
+│       ├── text_service.py         # Embeddings, label noise, consistency, chi-square, domain
+│       ├── schema_service.py       # Text/label column inference
+│       ├── scorer.py               # Weighted health score and grade
+│       ├── advisor.py              # Issues and remediation strategies
+│       └── rag_service.py          # Qdrant indexing, search and reranking
+└── frontend/
+    ├── package.json, vite.config.js, eslint.config.js, index.html
+    └── src/
+        ├── main.jsx, App.jsx       # Path switch: "/" landing, "/workspace" app
+        ├── index.css               # Theme variables, landing page, responsive rules
+        ├── pages/LandingPage.jsx
+        ├── services/api.js         # Axios + SSE stream reader
+        └── components/
+            ├── UploadBox.jsx       # Drag-and-drop CSV upload
+            ├── AuditForm.jsx       # Mode, column pickers, project intent
+            ├── DynamicLoader.jsx   # Loading spinner with rotating status text
+            ├── ResultsPanel.jsx    # Tabular and text audit results
+            ├── HealthDashboard.jsx # Score ring, sub-scores, issues, strategies, download
+            └── DatasetChat.jsx     # "Ask your dataset" search UI
 ```
+
+---
+
+## Tuning the Label-Noise Cutoff
+
+`tune_cutoff.py` replays already-downloaded reports to see how stricter flagging cutoffs would change the score, precision and recall, without re-running the audit.
+
+```bash
+python tune_cutoff.py [report_folder=.] [truth_folder=flip_test]
+```
+
+It expects `report_00.json`, `report_05.json`, `report_10.json`, `report_20.json` (audits of a clean file and files with 5/10/20% of labels flipped) and `flip_test/flip_XX_TRUTH.csv` with the flipped row indices.
 
 ---
 
 ## Known Limitations
 
-- **In-memory storage only** — uploaded files are lost on server restart. Production deployments should use Redis or S3.
-- **No authentication** — the API has no rate limiting or auth layer. Not suitable for public deployment as-is.
-- **NLP sampling cap** — text audits are capped at 5,000 rows for semantic checks and 2,000 rows for label noise detection. Results on large datasets are statistically representative but not exhaustive.
-- **Single-label classification only** — multi-label datasets are not currently supported.
-- **CSV only** — JSON, Parquet, and Excel formats are not yet supported.
+- **In-memory storage**: uploads and the Qdrant index are lost on restart. Use Redis/S3 and a persistent Qdrant for production.
+- **No authentication or rate limiting**.
+- **CSV only**, **single-label classification only**.
+- **No image auditing yet.**
+- **Sampling caps** apply to large datasets (see above), so text results are representative rather than exhaustive.
+- **Duplicates are exact-match only**; near-duplicate texts are caught only through the semantic checks.
+- **Topic similarity, not task fit**: Domain Suitability compares topics and can't tell whether your *task* matches the data.
+- **Chat index delay**: search results appear only after background indexing finishes.
+- **Frontend API URL and CORS ports are hard-coded** for local development.
 
 ---
 
